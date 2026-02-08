@@ -10,6 +10,7 @@
 #include "led.h"
 #include "main.h"
 #include "util.h"
+#include "usb_msc_device.h"
 
 #define VERSION_STR TO_STRING(FIRMWARE_VERSION_MAJOR) "." TO_STRING(FIRMWARE_VERSION_MINOR)
 
@@ -204,4 +205,15 @@ void tud_mount_cb(void) {
  */
 void tud_umount_cb(void) {
     mounted = false;
+}
+
+
+/**
+ * Ensure USB MSC is ejected before file operations.
+ * Safe to call even if already ejected.
+ */
+void usb_msc_ensure_ejected(void) {
+    if (!ejected) {
+        tud_msc_start_stop_cb(0, 0, false, true);
+    }
 }

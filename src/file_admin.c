@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <ff.h>
 
 #include "file_admin.h"
@@ -17,7 +18,7 @@
  */
 static bool content_has_delimiters(const char *content, int len) {
     for (int i = 0; i < len; i++) {
-        if (content[i] == '<' || content[i] == '>' || content[i] == '|') {
+        if (content[i] == PACKET_BEGIN || content[i] == PACKET_END || content[i] == PACKET_DELIMITER) {
             return true;
         }
     }
@@ -30,9 +31,38 @@ static bool content_has_delimiters(const char *content, int len) {
  * Only the exact active script filenames are protected, not arbitrary "schedule.*" files.
  */
 static bool is_protected_schedule_file(const char *filename) {
-    return (strcmp(filename, "schedule.wpi") == 0 ||
-            strcmp(filename, "schedule.act") == 0 ||
-            strcmp(filename, "schedule.skd") == 0);
+    return (strcasecmp(filename, "schedule.wpi") == 0 ||
+            strcasecmp(filename, "schedule.act") == 0 ||
+            strcasecmp(filename, "schedule.skd") == 0);
+}
+
+
+/**
+ * Only allow uploading/deleting known schedule-related file types.
+ * Allowed extensions: .wpi, .act, .skd (case-insensitive).
+ */
+static bool is_allowed_schedule_filename(const char *filename) {
+    if (filename == NULL) {
+        return false;
+    }
+    const char *dot = strrchr(filename, '.');
+    if (dot == NULL || dot[1] == '\0') {
+        return false;
+    }
+    if (strcasecmp(dot, ".wpi") == 0) return true;
+    if (strcasecmp(dot, ".act") == 0) return true;
+    if (strcasecmp(dot, ".skd") == 0) return true;
+    return false;
+}
+
+
+static int find_byte_bounded(const uint8_t *buf, size_t len, uint8_t value, size_t start_pos) {
+    for (size_t i = start_pos; i < len; i++) {
+        if (buf[i] == value) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 
@@ -63,41 +93,54 @@ uint8_t file_admin_upload(uint8_t dir) {
         return ADMIN_STATUS_INVALID_DIRECTORY;
     }
 
+    if (i2c_is_upload_buffer_overflowed()) {
+        debug_log("Upload rejected: packet too large\n");
+        return ADMIN_STATUS_FILE_TOO_LARGE;
+    }
+
     // Get upload buffer via interface function
-    uint8_t *upload_buffer = i2c_get_upload_buffer();
+    const uint8_t *upload_buffer = i2c_get_upload_buffer();
+    size_t buf_len = i2c_get_upload_buffer_len();
+    if (!upload_buffer || buf_len == 0) {
+        debug_log("Upload rejected: buffer is invalid\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
 
     // Parse packet: <filename|content|CRC>
-    char *start = strchr((char*)upload_buffer, PACKET_BEGIN);
-    char *end = strchr((char*)upload_buffer, PACKET_END);
-    if (!start || !end || end <= start) {
+    int start = find_byte_bounded(upload_buffer, buf_len, (uint8_t)PACKET_BEGIN, 0);
+    if (start < 0) {
+        debug_log("Upload rejected: missing PACKET_BEGIN\n");
         return ADMIN_STATUS_INVALID_PACKET;
     }
-    start++;  // Skip '<'
-
-    // Find first delimiter (after filename)
-    char *delim1 = strchr(start, PACKET_DELIMITER);
-    if (!delim1 || delim1 >= end) {
+    int end = find_byte_bounded(upload_buffer, buf_len, (uint8_t)PACKET_END, (size_t)start + 1);
+    if (end < 0 || end <= start + 1) {
+        debug_log("Upload rejected: missing PACKET_END\n");
         return ADMIN_STATUS_INVALID_PACKET;
     }
-
-    // Find second delimiter (after content, before CRC)
-    char *delim2 = strchr(delim1 + 1, PACKET_DELIMITER);
-    if (!delim2 || delim2 >= end) {
+    int delim1 = find_byte_bounded(upload_buffer, (size_t)end, (uint8_t)PACKET_DELIMITER, (size_t)start + 1);
+    int delim2 = find_byte_bounded(upload_buffer, (size_t)end, (uint8_t)PACKET_DELIMITER, (size_t)delim1 + 1);
+    if (delim1 < 0 || delim2 < 0 || delim1 <= start || delim2 <= delim1) {
+        debug_log("Upload rejected: PACKET_DELIMITER is missing or misplaced\n");
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
     // Extract filename
-    int name_len = delim1 - start;
+    int name_len = delim1 - start - 1;
     if (name_len <= 0 || name_len >= ADMIN_MAX_FILENAME_LEN) {
+        debug_log("Upload rejected: filename length is %d\n", name_len);
         return ADMIN_STATUS_INVALID_PACKET;
     }
     char filename[ADMIN_MAX_FILENAME_LEN];
-    memcpy(filename, start, name_len);
+    memcpy(filename, &upload_buffer[start + 1], name_len);
     filename[name_len] = '\0';
+    if (!is_allowed_schedule_filename(filename)) {
+        debug_log("Upload rejected: unsupported filename extension: %s\n", filename);
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
 
     // Extract content
-    char *content = delim1 + 1;
-    int content_len = delim2 - content;
+    const char *content = &upload_buffer[delim1 + 1];
+    int content_len = delim2 - delim1 - 1;
     if (content_len < 0) {
         return ADMIN_STATUS_INVALID_PACKET;
     }
@@ -173,20 +216,21 @@ uint8_t file_admin_download(uint8_t dir) {
         return ADMIN_STATUS_FILE_TOO_LARGE;
     }
 
-    // Ensure USB MSC is not mounted
+    // Ensure USB MSC is not mounted, although the FAT is safe without doing so
+    // This makes sure the downloaded data will be up-to-date
     usb_msc_ensure_ejected();
 
     // Clear buffer before reading to prevent partial corruption on failure
     memset(download_buffer, 0, ADMIN_MAX_FILE_CONTENT + 5);
 
-    // Read directly into download_buffer at offset 1 (after '<')
+    // Read directly into download_buffer at offset 1 (after PACKET_BEGIN)
     char *content = (char*)&download_buffer[1];
     int len = load_file(filepath, content, ADMIN_MAX_FILE_CONTENT);
     if (len < 0) {
         return ADMIN_STATUS_IO_ERROR;
     }
 
-    // Pack in-place: download_buffer[0] is '<', content already at [1..len]
+    // Pack in-place: download_buffer[0] is PACKET_BEGIN, content already at [1..len]
     download_buffer[0] = PACKET_BEGIN;
     uint8_t crc = i2c_calculate_crc8(download_buffer, len + 1);
     download_buffer[len + 1] = PACKET_DELIMITER;
@@ -213,6 +257,10 @@ uint8_t file_admin_delete(uint8_t dir) {
     // Extract filename
     char filename[ADMIN_MAX_FILENAME_LEN];
     if (!i2c_unpack_filename((char*)upload_buffer, filename)) {
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+    if (!is_allowed_schedule_filename(filename)) {
+        debug_log("Delete rejected: unsupported filename extension: %s\n", filename);
         return ADMIN_STATUS_INVALID_PACKET;
     }
 

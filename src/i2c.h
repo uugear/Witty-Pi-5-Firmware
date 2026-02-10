@@ -301,6 +301,12 @@ uint8_t* i2c_get_upload_buffer(void);
 /** Get pointer to download buffer */
 uint8_t* i2c_get_download_buffer(void);
 
+/** Get valid length of received upload packet (may include PACKET_END, excludes optional '\0') */
+size_t i2c_get_upload_buffer_len(void);
+
+/** Whether upload buffer overflow happened while receiving */
+bool i2c_is_upload_buffer_overflowed(void);
+
 /** Set download buffer read index */
 void i2c_set_download_buffer_index(int index);
 

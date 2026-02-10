@@ -95,6 +95,9 @@ int download_buffer_index = 0;
 
 uint8_t upload_buffer[UPLOAD_BUFFER_SIZE];
 int upload_buffer_index = 0;
+static bool upload_buffer_overflow = false;
+static size_t upload_buffer_len = 0;
+static bool download_packet_finished = false;
 
 const char *dir_names[DIRECTORY_COUNT + 1] = {
     NULL,
@@ -186,6 +189,7 @@ void pack_file_list(int dir) {
         }
 
         download_buffer_index = 0;
+        download_packet_finished = false;
     }
 }
 
@@ -230,8 +234,19 @@ uint8_t* i2c_get_download_buffer(void) {
     return download_buffer;
 }
 
+size_t i2c_get_upload_buffer_len(void) {
+    return upload_buffer_len;
+}
+
+bool i2c_is_upload_buffer_overflowed(void) {
+    return upload_buffer_overflow;
+}
+
 void i2c_set_download_buffer_index(int index) {
     download_buffer_index = index;
+    if (index == 0) {
+        download_packet_finished = false;
+    }
 }
 
 const char* i2c_get_dir_path(uint8_t dir_index) {
@@ -742,13 +757,35 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 					case I2C_ADMIN_DIR:         // Set directory
 					    download_buffer_index = 0;
 					    upload_buffer_index = 0;
+                        download_packet_finished = false;
+                        upload_buffer_len = 0;
+                        upload_buffer_overflow = false;
 					    break;
 					case I2C_ADMIN_UPLOAD:      // Master uploads something
-					    upload_buffer[upload_buffer_index ++] = data;
-					    if (data == PACKET_END) {
-					        upload_buffer[upload_buffer_index ++] = '\0';
-					    }
-					    break;
+                        // Reset upload state on new packet start
+                        if (data == PACKET_BEGIN) {
+                            upload_buffer_index = 0;
+                            upload_buffer_len = 0;
+                            upload_buffer_overflow = false;
+                        }
+                        // Hard boundary protection
+                        if (!upload_buffer_overflow) {
+                            if (upload_buffer_index < UPLOAD_BUFFER_SIZE) {
+                                upload_buffer[upload_buffer_index++] = data;
+                                upload_buffer_len = (size_t)upload_buffer_index;
+                                if (data == PACKET_END) {
+                                    bool added_terminator = false;
+                                    if (upload_buffer_index < UPLOAD_BUFFER_SIZE) {
+                                        upload_buffer[upload_buffer_index++] = '\0';
+                                        added_terminator = true;
+                                    }
+                                    upload_buffer_len = (size_t)(added_terminator ? upload_buffer_index - 1 : upload_buffer_index);
+                                }
+                            } else {
+                                upload_buffer_overflow = true;
+                            }
+                        }
+                        break;
 				}
 			} else {    // Write [Virtual registers]
 				if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_CONTROL_REGISTER) {	// RX8025
@@ -796,7 +833,14 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 		    data = get_config_register(i2c_index);
 		} else if (i2c_index >= I2C_ADMIN_FIRST && i2c_index <= I2C_ADMIN_LAST) {	// Read [Admin register]
 			if (i2c_index == I2C_ADMIN_DOWNLOAD) {                  // Master downloads something
-		        data = download_buffer[download_buffer_index ++];
+                if (!download_packet_finished && download_buffer_index < DOWNLOAD_BUFFER_SIZE) {
+                    data = download_buffer[download_buffer_index++];
+                    if (data == PACKET_END) {
+                        download_packet_finished = true;
+                    }
+                } else {
+                    data = 0x00;
+                }
 		    } else {                                                // Master reads a admin register
 		        data = i2c_admin_reg[i2c_index - I2C_ADMIN_FIRST];
 		    }

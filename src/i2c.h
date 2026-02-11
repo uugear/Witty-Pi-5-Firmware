@@ -161,6 +161,9 @@
 #define I2C_ADMIN_PWD_CMD_LIST_FILES                0xA0F1
 #define I2C_ADMIN_PWD_CMD_CHOOSE_SCRIPT             0xA159
 #define I2C_ADMIN_PWD_CMD_PURGE_SCRIPT              0xA260
+#define I2C_ADMIN_PWD_CMD_FILE_UPLOAD               0xA355
+#define I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD             0xA456
+#define I2C_ADMIN_PWD_CMD_FILE_DELETE               0xA557
 
 
 /*
@@ -285,6 +288,36 @@ void run_admin_command();
  * @param shutdown true to request shutdown, false to clear the request
  */
 void request_rpi_shutdown(bool shutdown);
+
+
+/*
+ * Interface functions for file_admin module
+ * These provide controlled access to i2c.c internals without using extern declarations.
+ */
+
+/** Get pointer to upload buffer */
+uint8_t* i2c_get_upload_buffer(void);
+
+/** Get pointer to download buffer */
+uint8_t* i2c_get_download_buffer(void);
+
+/** Get valid length of received upload packet (may include PACKET_END, excludes optional '\0') */
+size_t i2c_get_upload_buffer_len(void);
+
+/** Whether upload buffer overflow happened while receiving */
+bool i2c_is_upload_buffer_overflowed(void);
+
+/** Set download buffer read index */
+void i2c_set_download_buffer_index(int index);
+
+/** Get directory path by index (1=root, 2=conf, 3=log, 4=schedule) */
+const char* i2c_get_dir_path(uint8_t dir_index);
+
+/** Calculate CRC-8 over data */
+uint8_t i2c_calculate_crc8(const uint8_t *data, size_t len);
+
+/** Unpack filename from packet format <filename|...> into output buffer */
+bool i2c_unpack_filename(char *input, char *output);
 
 
 #endif

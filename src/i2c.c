@@ -19,6 +19,7 @@
 #include "id_eeprom.h"
 #include "script.h"
 #include "util.h"
+#include "file_admin.h"
 
 
 #define PRODUCT_INFO_STR        PRODUCT_NAME " (Firmware: V" TO_STRING(FIRMWARE_VERSION_MAJOR) "." TO_STRING(FIRMWARE_VERSION_MINOR) ")\n"
@@ -43,8 +44,24 @@
 #define ADMIN_RPI_REBOOTING     3
 
 #define CRC8_POLYNOMIAL			0x31	// CRC-8 Polynomial (x^8 + x^5 + x^4 + 1 -> 00110001 -> 0x31)
-#define DOWNLOAD_BUFFER_SIZE	1024
-#define UPLOAD_BUFFER_SIZE	    1024
+
+/*
+ * I2C transfer buffers
+ *
+ * Buffer size of 4096 bytes is sufficient for file operations.
+ * For .wpi schedule files:
+ *   - ~4000 bytes usable content (after packet overhead)
+ *   - Supports ~395 ON/OFF schedule lines (~200 cycles)
+ *   - Note: script.c parser limits to 128 lines regardless of buffer size
+ *
+ * RAM impact: 2 * 4096 = 8KB (RP2350 has 520KB SRAM total)
+ */
+#define DOWNLOAD_BUFFER_SIZE	4096
+#define UPLOAD_BUFFER_SIZE	    4096
+
+/* Compile-time validation of buffer sizes */
+_Static_assert(DOWNLOAD_BUFFER_SIZE <= 8192, "Download buffer too large");
+_Static_assert(UPLOAD_BUFFER_SIZE <= 8192, "Upload buffer too large");
 
 #define DIRECTORY_COUNT         4
 
@@ -78,6 +95,9 @@ int download_buffer_index = 0;
 
 uint8_t upload_buffer[UPLOAD_BUFFER_SIZE];
 int upload_buffer_index = 0;
+static bool upload_buffer_overflow = false;
+static size_t upload_buffer_len = 0;
+static bool download_packet_finished = false;
 
 const char *dir_names[DIRECTORY_COUNT + 1] = {
     NULL,
@@ -169,6 +189,7 @@ void pack_file_list(int dir) {
         }
 
         download_buffer_index = 0;
+        download_packet_finished = false;
     }
 }
 
@@ -198,6 +219,49 @@ bool unpack_filename(char* input, char* output) {
     strncpy(output, start, filename_len);
     output[filename_len] = '\0';
     return true;
+}
+
+
+/*
+ * Interface functions for file_admin module
+ */
+
+uint8_t* i2c_get_upload_buffer(void) {
+    return upload_buffer;
+}
+
+uint8_t* i2c_get_download_buffer(void) {
+    return download_buffer;
+}
+
+size_t i2c_get_upload_buffer_len(void) {
+    return upload_buffer_len;
+}
+
+bool i2c_is_upload_buffer_overflowed(void) {
+    return upload_buffer_overflow;
+}
+
+void i2c_set_download_buffer_index(int index) {
+    download_buffer_index = index;
+    if (index == 0) {
+        download_packet_finished = false;
+    }
+}
+
+const char* i2c_get_dir_path(uint8_t dir_index) {
+    if (dir_index < 1 || dir_index > 4) {
+        return NULL;
+    }
+    return dir_names[dir_index];
+}
+
+uint8_t i2c_calculate_crc8(const uint8_t *data, size_t len) {
+    return calculate_crc8(data, len);
+}
+
+bool i2c_unpack_filename(char *input, char *output) {
+    return unpack_filename(input, output);
 }
 
 
@@ -314,6 +378,18 @@ void run_admin_command() {
     	case I2C_ADMIN_PWD_CMD_PURGE_SCRIPT:        // Purge schedule script
     	    debug_log("Admin CMD: Purge Script\n");
     	    purge_script();
+    	    break;
+    	case I2C_ADMIN_PWD_CMD_FILE_UPLOAD:         // Upload file to filesystem
+    	    debug_log("Admin CMD: File Upload\n");
+    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_upload(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
+    	    break;
+    	case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD:       // Download file from filesystem
+    	    debug_log("Admin CMD: File Download\n");
+    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_download(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
+    	    break;
+    	case I2C_ADMIN_PWD_CMD_FILE_DELETE:         // Delete file from filesystem
+    	    debug_log("Admin CMD: File Delete\n");
+    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_delete(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
     	    break;
     	default:
     	    debug_log("Unknown admin command: pwd=0x%02x, cmd=0x%02x\n", pwd, cmd);
@@ -681,13 +757,35 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 					case I2C_ADMIN_DIR:         // Set directory
 					    download_buffer_index = 0;
 					    upload_buffer_index = 0;
+                        download_packet_finished = false;
+                        upload_buffer_len = 0;
+                        upload_buffer_overflow = false;
 					    break;
 					case I2C_ADMIN_UPLOAD:      // Master uploads something
-					    upload_buffer[upload_buffer_index ++] = data;
-					    if (data == PACKET_END) {
-					        upload_buffer[upload_buffer_index ++] = '\0';
-					    }
-					    break;
+                        // Reset upload state on new packet start
+                        if (data == PACKET_BEGIN) {
+                            upload_buffer_index = 0;
+                            upload_buffer_len = 0;
+                            upload_buffer_overflow = false;
+                        }
+                        // Hard boundary protection
+                        if (!upload_buffer_overflow) {
+                            if (upload_buffer_index < UPLOAD_BUFFER_SIZE) {
+                                upload_buffer[upload_buffer_index++] = data;
+                                upload_buffer_len = (size_t)upload_buffer_index;
+                                if (data == PACKET_END) {
+                                    bool added_terminator = false;
+                                    if (upload_buffer_index < UPLOAD_BUFFER_SIZE) {
+                                        upload_buffer[upload_buffer_index++] = '\0';
+                                        added_terminator = true;
+                                    }
+                                    upload_buffer_len = (size_t)(added_terminator ? upload_buffer_index - 1 : upload_buffer_index);
+                                }
+                            } else {
+                                upload_buffer_overflow = true;
+                            }
+                        }
+                        break;
 				}
 			} else {    // Write [Virtual registers]
 				if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_CONTROL_REGISTER) {	// RX8025
@@ -735,7 +833,14 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 		    data = get_config_register(i2c_index);
 		} else if (i2c_index >= I2C_ADMIN_FIRST && i2c_index <= I2C_ADMIN_LAST) {	// Read [Admin register]
 			if (i2c_index == I2C_ADMIN_DOWNLOAD) {                  // Master downloads something
-		        data = download_buffer[download_buffer_index ++];
+                if (!download_packet_finished && download_buffer_index < DOWNLOAD_BUFFER_SIZE) {
+                    data = download_buffer[download_buffer_index++];
+                    if (data == PACKET_END) {
+                        download_packet_finished = true;
+                    }
+                } else {
+                    data = 0x00;
+                }
 		    } else {                                                // Master reads a admin register
 		        data = i2c_admin_reg[i2c_index - I2C_ADMIN_FIRST];
 		    }

@@ -164,6 +164,7 @@
 #define I2C_ADMIN_PWD_CMD_FILE_UPLOAD               0xA355
 #define I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD             0xA456
 #define I2C_ADMIN_PWD_CMD_FILE_DELETE               0xA557
+#define I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD_NEXT        0xA560
 
 
 /*

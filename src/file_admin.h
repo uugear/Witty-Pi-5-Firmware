@@ -53,4 +53,17 @@ uint8_t file_admin_download(uint8_t dir);
  */
 uint8_t file_admin_delete(uint8_t dir);
 
+/**
+ * Load next chunk for chunked file download
+ * Called by FILE_DOWNLOAD_NEXT command
+ * @return Status code for I2C_ADMIN_CONTEXT
+ */
+uint8_t file_admin_load_chunk(void);
+
+/**
+ * Clear download session state
+ * Called when directory changes or on new download request
+ */
+void file_admin_clear_download_state(void);
+
 #endif

@@ -391,6 +391,10 @@ void run_admin_command() {
     	    debug_log("Admin CMD: File Delete\n");
     	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_delete(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
     	    break;
+    	case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD_NEXT:  // Load next chunk for chunked download
+    	    debug_log("Admin CMD: File Download Next\n");
+    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_load_chunk();
+    	    break;
     	default:
     	    debug_log("Unknown admin command: pwd=0x%02x, cmd=0x%02x\n", pwd, cmd);
 	}
@@ -760,6 +764,7 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
                         download_packet_finished = false;
                         upload_buffer_len = 0;
                         upload_buffer_overflow = false;
+                        file_admin_clear_download_state();  // Clear chunked download session
 					    break;
 					case I2C_ADMIN_UPLOAD:      // Master uploads something
                         // Reset upload state on new packet start

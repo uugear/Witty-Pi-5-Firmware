@@ -2,6 +2,7 @@
 #define _I2C_H_
 
 #include <stdint.h>
+#include <stddef.h>
 
 
 #define RX8025_ADDRESS				0x32
@@ -310,6 +311,9 @@ bool i2c_is_upload_buffer_overflowed(void);
 
 /** Set download buffer read index */
 void i2c_set_download_buffer_index(int index);
+
+/** Set valid length of prepared download packet (including PACKET_END, excluding optional '\0') */
+void i2c_set_download_buffer_len(size_t len);
 
 /** Get directory path by index (1=root, 2=conf, 3=log, 4=schedule) */
 const char* i2c_get_dir_path(uint8_t dir_index);

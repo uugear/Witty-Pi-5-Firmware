@@ -52,6 +52,26 @@ static void byte_to_hex(uint8_t byte, char *out) {
 
 
 /**
+ * Parse two hex ASCII characters into a byte
+ */
+static int hex_digit_to_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+static bool parse_hex_byte_2chars(const uint8_t *in, uint8_t *out) {
+    if (!in || !out) return false;
+    int hi = hex_digit_to_nibble((char)in[0]);
+    int lo = hex_digit_to_nibble((char)in[1]);
+    if (hi < 0 || lo < 0) return false;
+    *out = (uint8_t)((hi << 4) | lo);
+    return true;
+}
+
+
+/**
  * Check if content contains protocol delimiter characters
  */
 static bool content_has_delimiters(const char *content, int len) {
@@ -161,6 +181,7 @@ uint8_t file_admin_load_chunk(void) {
         byte_to_hex(crc, (char*)&download_buffer[7]);
         download_buffer[9] = PACKET_END;
         download_buffer[10] = '\0';
+        i2c_set_download_buffer_len(10);
         i2c_set_download_buffer_index(0);
 
         // End session
@@ -212,6 +233,7 @@ uint8_t file_admin_load_chunk(void) {
     byte_to_hex(crc, (char*)&download_buffer[content_end + 1]);
     download_buffer[content_end + 3] = PACKET_END;
     download_buffer[content_end + 4] = '\0';
+    i2c_set_download_buffer_len(content_end + 4);
     i2c_set_download_buffer_index(0);
 
     // Advance position
@@ -245,7 +267,7 @@ uint8_t file_admin_upload(uint8_t dir) {
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
-    // Parse packet: <filename|content|CRC>
+    // Parse packet: <filename|content|HH>
     int start = find_byte_bounded(upload_buffer, buf_len, (uint8_t)PACKET_BEGIN, 0);
     if (start < 0) {
         debug_log("Upload rejected: missing PACKET_BEGIN\n");
@@ -260,6 +282,23 @@ uint8_t file_admin_upload(uint8_t dir) {
     int delim2 = find_byte_bounded(upload_buffer, (size_t)end, (uint8_t)PACKET_DELIMITER, (size_t)delim1 + 1);
     if (delim1 < 0 || delim2 < 0 || delim1 <= start || delim2 <= delim1) {
         debug_log("Upload rejected: PACKET_DELIMITER is missing or misplaced\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+
+    // Validate CRC: packet must end with "|HH>" and CRC-8 is calculated over "<...|" (including the last '|')
+    if (end != delim2 + 3) {
+        debug_log("Upload rejected: CRC field length is invalid\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+    uint8_t crc_rx = 0;
+    if (!parse_hex_byte_2chars(&upload_buffer[delim2 + 1], &crc_rx)) {
+        debug_log("Upload rejected: CRC field is not valid hex\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+    size_t crc_len = (size_t)(delim2 - start + 1);
+    uint8_t crc_calc = i2c_calculate_crc8(&upload_buffer[start], crc_len);
+    if (crc_calc != crc_rx) {
+        debug_log("Upload rejected: CRC mismatch (calc=%02X rx=%02X)\n", crc_calc, crc_rx);
         return ADMIN_STATUS_INVALID_PACKET;
     }
 

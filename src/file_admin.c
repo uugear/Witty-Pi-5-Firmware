@@ -12,6 +12,64 @@
 
 #define DIRECTORY_SCHEDULE 4
 
+// Internal download session state for chunked transfers
+typedef struct {
+    char filepath[ADMIN_MAX_FILEPATH_LEN];  // Cached filepath
+    uint32_t file_size;                      // Total file size (captured at start)
+    uint32_t offset;                         // Current read position
+    bool active;                             // Session in progress
+} DownloadState;
+
+static DownloadState download_state = {0};
+
+
+/**
+ * Convert nibble (0-15) to hex ASCII character
+ */
+static char nibble_to_hex(uint8_t n) {
+    return (n < 10) ? ('0' + n) : ('A' + n - 10);
+}
+
+
+/**
+ * Write 16-bit value as 4 hex ASCII characters
+ */
+static void uint16_to_hex4(uint16_t val, char *out) {
+    out[0] = nibble_to_hex((val >> 12) & 0x0F);
+    out[1] = nibble_to_hex((val >> 8) & 0x0F);
+    out[2] = nibble_to_hex((val >> 4) & 0x0F);
+    out[3] = nibble_to_hex(val & 0x0F);
+}
+
+
+/**
+ * Write byte as 2 hex ASCII characters
+ */
+static void byte_to_hex(uint8_t byte, char *out) {
+    out[0] = nibble_to_hex((byte >> 4) & 0x0F);
+    out[1] = nibble_to_hex(byte & 0x0F);
+}
+
+
+/**
+ * Parse two hex ASCII characters into a byte
+ */
+static int hex_digit_to_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+static bool parse_hex_byte_2chars(const uint8_t *in, uint8_t *out) {
+    if (!in || !out) return false;
+    int hi = hex_digit_to_nibble((char)in[0]);
+    int lo = hex_digit_to_nibble((char)in[1]);
+    if (hi < 0 || lo < 0) return false;
+    *out = (uint8_t)((hi << 4) | lo);
+    return true;
+}
+
 
 /**
  * Check if content contains protocol delimiter characters
@@ -86,6 +144,109 @@ static bool build_filepath(uint8_t dir, const char *filename, char *out, size_t 
 }
 
 
+/**
+ * Clear download session state
+ */
+void file_admin_clear_download_state(void) {
+    memset(&download_state, 0, sizeof(download_state));
+}
+
+
+/**
+ * Load next chunk into download buffer
+ * Called by FILE_DOWNLOAD (first chunk) and FILE_DOWNLOAD_NEXT (subsequent chunks)
+ *
+ * Packet format: <LLLL|content|HH>
+ * - LLLL: 4 hex ASCII chars for content length (e.g., "0FA0" = 4000)
+ * - content: 0-4000 bytes of file data
+ * - HH: CRC-8 as 2 hex ASCII chars
+ *
+ * EOF is signaled by zero-length content: <0000||HH>
+ */
+uint8_t file_admin_load_chunk(void) {
+    if (!download_state.active) {
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+
+    uint8_t *download_buffer = i2c_get_download_buffer();
+
+    // Check if we've read everything (includes empty files: offset=0, size=0)
+    if (download_state.offset >= download_state.file_size) {
+        // Send EOF packet: <0000||HH>
+        download_buffer[0] = PACKET_BEGIN;
+        uint16_to_hex4(0, (char*)&download_buffer[1]);  // "0000"
+        download_buffer[5] = PACKET_DELIMITER;
+        download_buffer[6] = PACKET_DELIMITER;
+        uint8_t crc = i2c_calculate_crc8(download_buffer, 7);  // CRC over <0000||
+        byte_to_hex(crc, (char*)&download_buffer[7]);
+        download_buffer[9] = PACKET_END;
+        download_buffer[10] = '\0';
+        i2c_set_download_buffer_len(10);
+        i2c_set_download_buffer_index(0);
+
+        // End session
+        download_state.active = false;
+        debug_log("Download complete\n");
+        return ADMIN_STATUS_OK;
+    }
+
+    // Calculate chunk size
+    uint32_t remaining = download_state.file_size - download_state.offset;
+    uint32_t chunk_size = (remaining > ADMIN_MAX_FILE_CONTENT)
+                          ? ADMIN_MAX_FILE_CONTENT
+                          : remaining;
+
+    // Open file and seek to position
+    FIL file;
+    if (f_open(&file, download_state.filepath, FA_READ) != FR_OK) {
+        download_state.active = false;
+        return ADMIN_STATUS_IO_ERROR;
+    }
+
+    if (download_state.offset > 0) {
+        if (f_lseek(&file, download_state.offset) != FR_OK) {
+            f_close(&file);
+            download_state.active = false;
+            return ADMIN_STATUS_IO_ERROR;
+        }
+    }
+
+    // Read chunk into buffer at offset 6 (after header: <LLLL|)
+    UINT bytes_read = 0;
+    FRESULT res = f_read(&file, &download_buffer[6], chunk_size, &bytes_read);
+    f_close(&file);
+
+    if (res != FR_OK) {
+        download_state.active = false;
+        return ADMIN_STATUS_IO_ERROR;
+    }
+
+    // Build complete packet with actual bytes_read
+    // Format: <LLLL|content|HH>
+    download_buffer[0] = PACKET_BEGIN;
+    uint16_to_hex4((uint16_t)bytes_read, (char*)&download_buffer[1]);
+    download_buffer[5] = PACKET_DELIMITER;
+    // Content is already at download_buffer[6..6+bytes_read-1]
+    size_t content_end = 6 + bytes_read;
+    download_buffer[content_end] = PACKET_DELIMITER;
+    uint8_t crc = i2c_calculate_crc8(download_buffer, content_end + 1);
+    byte_to_hex(crc, (char*)&download_buffer[content_end + 1]);
+    download_buffer[content_end + 3] = PACKET_END;
+    download_buffer[content_end + 4] = '\0';
+    i2c_set_download_buffer_len(content_end + 4);
+    i2c_set_download_buffer_index(0);
+
+    // Advance position
+    download_state.offset += bytes_read;
+
+    debug_log("Chunk: %lu bytes (offset now %lu/%lu)\n",
+              (unsigned long)bytes_read, (unsigned long)download_state.offset,
+              (unsigned long)download_state.file_size);
+
+    return ADMIN_STATUS_OK;
+}
+
+
 uint8_t file_admin_upload(uint8_t dir) {
     // Only /schedule allowed for uploads
     if (dir != DIRECTORY_SCHEDULE) {
@@ -106,7 +267,7 @@ uint8_t file_admin_upload(uint8_t dir) {
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
-    // Parse packet: <filename|content|CRC>
+    // Parse packet: <filename|content|HH>
     int start = find_byte_bounded(upload_buffer, buf_len, (uint8_t)PACKET_BEGIN, 0);
     if (start < 0) {
         debug_log("Upload rejected: missing PACKET_BEGIN\n");
@@ -121,6 +282,23 @@ uint8_t file_admin_upload(uint8_t dir) {
     int delim2 = find_byte_bounded(upload_buffer, (size_t)end, (uint8_t)PACKET_DELIMITER, (size_t)delim1 + 1);
     if (delim1 < 0 || delim2 < 0 || delim1 <= start || delim2 <= delim1) {
         debug_log("Upload rejected: PACKET_DELIMITER is missing or misplaced\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+
+    // Validate CRC: packet must end with "|HH>" and CRC-8 is calculated over "<...|" (including the last '|')
+    if (end != delim2 + 3) {
+        debug_log("Upload rejected: CRC field length is invalid\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+    uint8_t crc_rx = 0;
+    if (!parse_hex_byte_2chars(&upload_buffer[delim2 + 1], &crc_rx)) {
+        debug_log("Upload rejected: CRC field is not valid hex\n");
+        return ADMIN_STATUS_INVALID_PACKET;
+    }
+    size_t crc_len = (size_t)(delim2 - start + 1);
+    uint8_t crc_calc = i2c_calculate_crc8(&upload_buffer[start], crc_len);
+    if (crc_calc != crc_rx) {
+        debug_log("Upload rejected: CRC mismatch (calc=%02X rx=%02X)\n", crc_calc, crc_rx);
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
@@ -185,62 +363,44 @@ uint8_t file_admin_upload(uint8_t dir) {
 
 
 uint8_t file_admin_download(uint8_t dir) {
-    // All directories allowed for download
+    // All directories allowed for download (1-4)
     if (dir < 1 || dir > 4) {
         return ADMIN_STATUS_INVALID_DIRECTORY;
     }
 
-    // Get buffers via interface functions
+    // Extract filename from upload buffer
     uint8_t *upload_buffer = i2c_get_upload_buffer();
-    uint8_t *download_buffer = i2c_get_download_buffer();
-
-    // Extract filename using existing helper
     char filename[ADMIN_MAX_FILENAME_LEN];
     if (!i2c_unpack_filename((char*)upload_buffer, filename)) {
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
-    // Build filepath
+    // Build full filepath
     char filepath[ADMIN_MAX_FILEPATH_LEN];
     if (!build_filepath(dir, filename, filepath, sizeof(filepath))) {
         return ADMIN_STATUS_INVALID_PACKET;
     }
 
-    // Check file size before reading
+    // Get file info - NO LONGER REJECT LARGE FILES
     FILINFO fno;
     if (f_stat(filepath, &fno) != FR_OK) {
         return ADMIN_STATUS_FILE_NOT_FOUND;
     }
-    if (fno.fsize > ADMIN_MAX_FILE_CONTENT) {
-        debug_log("Download rejected: file too large (%lu > %d)\n", fno.fsize, ADMIN_MAX_FILE_CONTENT);
-        return ADMIN_STATUS_FILE_TOO_LARGE;
-    }
 
-    // Ensure USB MSC is not mounted, although the FAT is safe without doing so
-    // This makes sure the downloaded data will be up-to-date
+    // Ensure USB MSC is not mounted
     usb_msc_ensure_ejected();
 
-    // Clear buffer before reading to prevent partial corruption on failure
-    memset(download_buffer, 0, ADMIN_MAX_FILE_CONTENT + 5);
+    // Initialize download session
+    strncpy(download_state.filepath, filepath, sizeof(download_state.filepath));
+    download_state.filepath[sizeof(download_state.filepath) - 1] = '\0';
+    download_state.file_size = fno.fsize;
+    download_state.offset = 0;
+    download_state.active = true;
 
-    // Read directly into download_buffer at offset 1 (after PACKET_BEGIN)
-    char *content = (char*)&download_buffer[1];
-    int len = load_file(filepath, content, ADMIN_MAX_FILE_CONTENT);
-    if (len < 0) {
-        return ADMIN_STATUS_IO_ERROR;
-    }
+    debug_log("Download started: %s (%lu bytes)\n", filepath, (unsigned long)fno.fsize);
 
-    // Pack in-place: download_buffer[0] is PACKET_BEGIN, content already at [1..len]
-    download_buffer[0] = PACKET_BEGIN;
-    uint8_t crc = i2c_calculate_crc8(download_buffer, len + 1);
-    download_buffer[len + 1] = PACKET_DELIMITER;
-    download_buffer[len + 2] = crc;
-    download_buffer[len + 3] = PACKET_END;
-    download_buffer[len + 4] = '\0';
-    i2c_set_download_buffer_index(0);
-
-    debug_log("Downloaded %d bytes from %s\n", len, filepath);
-    return ADMIN_STATUS_OK;
+    // Load first chunk (or EOF packet for empty files)
+    return file_admin_load_chunk();
 }
 
 

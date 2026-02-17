@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 set(PICO_PLATFORM "rp2350" CACHE INTERNAL "")
 set(PICO_BOARD "uugear_wittypi5_hat_plus" CACHE INTERNAL "")
+set(PICO_BOARD_HEADER_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE INTERNAL "")
 
 set(PICO_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lib/pico-sdk")
 include(pico_sdk_import.cmake)

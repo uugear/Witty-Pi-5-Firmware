@@ -59,9 +59,14 @@
 #define DOWNLOAD_BUFFER_SIZE	4096
 #define UPLOAD_BUFFER_SIZE	    4096
 
+// Packet overhead for chunked download: <LLLL|content|HH>
+#define ADMIN_DOWNLOAD_PACKET_OVERHEAD (1 + 4 + 1 + 1 + 2 + 1)
+
 /* Compile-time validation of buffer sizes */
 _Static_assert(DOWNLOAD_BUFFER_SIZE <= 8192, "Download buffer too large");
 _Static_assert(UPLOAD_BUFFER_SIZE <= 8192, "Upload buffer too large");
+_Static_assert(ADMIN_MAX_FILE_CONTENT + ADMIN_DOWNLOAD_PACKET_OVERHEAD <= DOWNLOAD_BUFFER_SIZE,
+               "ADMIN_MAX_FILE_CONTENT too large for download buffer");
 
 #define DIRECTORY_COUNT         4
 
@@ -92,23 +97,21 @@ extern uint8_t heartbeat_missing_count;
 
 uint8_t download_buffer[DOWNLOAD_BUFFER_SIZE];
 int download_buffer_index = 0;
+static size_t download_buffer_len = 0;
 
 uint8_t upload_buffer[UPLOAD_BUFFER_SIZE];
 int upload_buffer_index = 0;
 static bool upload_buffer_overflow = false;
 static size_t upload_buffer_len = 0;
-static bool download_packet_finished = false;
 
 const char *dir_names[DIRECTORY_COUNT + 1] = {
-    NULL,
-    "/",
-    "/conf",
-	"/log",
-	"/schedule"
+    "[NONE]",       // 0: DIRECTORY_NONE
+    "/",            // 1: DIRECTORY_ROOT
+    "/conf",        // 2: DIRECTORY_CONF
+    "/log",         // 3: DIRECTORY_LOG
+    "/schedule"     // 4: DIRECTORY_SCHEDULE
 };
-
 uint64_t heartbeat_update_time = 0;
-
 
 /**
  * Calculates the CRC-8 checksum for a data buffer
@@ -186,37 +189,99 @@ void pack_file_list(int dir) {
             }
         } else {
             debug_log("Failed to open directory %s. Error code: %d\n", dir_names[dir], fr);
+            index = 0;
+            download_buffer[0] = '\0';
         }
 
+        download_buffer_len = (size_t)index;
         download_buffer_index = 0;
-        download_packet_finished = false;
     }
 }
 
 
+static int hex_digit_to_nibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    return -1;
+}
+
+static bool parse_hex_byte_2chars(const char *in, uint8_t *out) {
+    if (!in || !out) {
+        return false;
+    }
+    int hi = hex_digit_to_nibble(in[0]);
+    int lo = hex_digit_to_nibble(in[1]);
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+    *out = (uint8_t)((hi << 4) | lo);
+    return true;
+}
+
 // Extract file name from packet and save to buffer
+// Expected packet format: <filename|...|HH>
+// CRC-8 is calculated over bytes from PACKET_BEGIN ('<') up to and including the last PACKET_DELIMITER ('|').
 bool unpack_filename(char* input, char* output) {
     if (input == NULL || output == NULL) {
         return false;
     }
-    char* start = strchr(input, PACKET_BEGIN);
-    if (start == NULL) {
+
+    char *p_begin = strchr(input, PACKET_BEGIN);
+    if (p_begin == NULL) {
         return false;
     }
-    start++;
-    char* end = strchr(start, PACKET_END);
-    if (end == NULL) {
+    char *p_end = strchr(p_begin + 1, PACKET_END);
+    if (p_end == NULL) {
         return false;
     }
-    char* delimiter = strchr(start, PACKET_DELIMITER);
-    if (delimiter == NULL || delimiter >= end) {
+
+    // First delimiter separates filename
+    char *p_delim1 = strchr(p_begin + 1, PACKET_DELIMITER);
+    if (p_delim1 == NULL || p_delim1 >= p_end) {
         return false;
     }
-    int filename_len = delimiter - start;
+
+    // Last delimiter separates CRC field
+    char *p_last_delim = NULL;
+    for (char *p = p_end - 1; p > p_begin; --p) {
+        if (*p == PACKET_DELIMITER) {
+            p_last_delim = p;
+            break;
+        }
+    }
+    if (p_last_delim == NULL || p_last_delim >= p_end) {
+        return false;
+    }
+
+    // Require exactly 2 hex chars for CRC between last delimiter and PACKET_END
+    if ((p_end - p_last_delim) != 3) {
+        return false;
+    }
+    uint8_t crc_rx = 0;
+    if (!parse_hex_byte_2chars(p_last_delim + 1, &crc_rx)) {
+        return false;
+    }
+
+    size_t crc_len = (size_t)(p_last_delim - p_begin + 1);
+    uint8_t crc_calc = calculate_crc8((const uint8_t *)p_begin, crc_len);
+    if (crc_calc != crc_rx) {
+        return false;
+    }
+
+    int filename_len = (int)(p_delim1 - (p_begin + 1));
     if (filename_len <= 0) {
         return false;
     }
-    strncpy(output, start, filename_len);
+
+    // memmove handles overlapping input/output buffers safely
+    memmove(output, p_begin + 1, (size_t)filename_len);
     output[filename_len] = '\0';
     return true;
 }
@@ -244,14 +309,18 @@ bool i2c_is_upload_buffer_overflowed(void) {
 
 void i2c_set_download_buffer_index(int index) {
     download_buffer_index = index;
-    if (index == 0) {
-        download_packet_finished = false;
+}
+
+void i2c_set_download_buffer_len(size_t len) {
+    if (len > DOWNLOAD_BUFFER_SIZE) {
+        len = DOWNLOAD_BUFFER_SIZE;
     }
+    download_buffer_len = len;
 }
 
 const char* i2c_get_dir_path(uint8_t dir_index) {
-    if (dir_index < 1 || dir_index > 4) {
-        return NULL;
+    if (dir_index >= (uint8_t)(sizeof(dir_names) / sizeof(dir_names[0]))) {
+        return "[UNKNOWN]";
     }
     return dir_names[dir_index];
 }
@@ -390,6 +459,10 @@ void run_admin_command() {
     	case I2C_ADMIN_PWD_CMD_FILE_DELETE:         // Delete file from filesystem
     	    debug_log("Admin CMD: File Delete\n");
     	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_delete(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
+    	    break;
+    	case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD_NEXT:  // Load next chunk for chunked download
+    	    debug_log("Admin CMD: File Download Next\n");
+    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_load_chunk();
     	    break;
     	default:
     	    debug_log("Unknown admin command: pwd=0x%02x, cmd=0x%02x\n", pwd, cmd);
@@ -755,11 +828,15 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 					    }
 						break;
 					case I2C_ADMIN_DIR:         // Set directory
-					    download_buffer_index = 0;
-					    upload_buffer_index = 0;
-                        download_packet_finished = false;
-                        upload_buffer_len = 0;
-                        upload_buffer_overflow = false;
+					    if (old_value != data) {
+    					    download_buffer_index = 0;
+    					    download_buffer_len = 0;
+    					    upload_buffer_index = 0;
+                            upload_buffer_len = 0;
+                            upload_buffer_overflow = false;
+                            file_admin_clear_download_state();  // Clear chunked download session
+                            debug_log("Set directory to: %s\n", i2c_get_dir_path(data));
+                        }
 					    break;
 					case I2C_ADMIN_UPLOAD:      // Master uploads something
                         // Reset upload state on new packet start
@@ -833,14 +910,11 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 		    data = get_config_register(i2c_index);
 		} else if (i2c_index >= I2C_ADMIN_FIRST && i2c_index <= I2C_ADMIN_LAST) {	// Read [Admin register]
 			if (i2c_index == I2C_ADMIN_DOWNLOAD) {                  // Master downloads something
-                if (!download_packet_finished && download_buffer_index < DOWNLOAD_BUFFER_SIZE) {
-                    data = download_buffer[download_buffer_index++];
-                    if (data == PACKET_END) {
-                        download_packet_finished = true;
-                    }
-                } else {
-                    data = 0x00;
-                }
+				if ((size_t)download_buffer_index < download_buffer_len) {
+					data = download_buffer[download_buffer_index++];
+				} else {
+					data = 0x00;
+				}
 		    } else {                                                // Master reads a admin register
 		        data = i2c_admin_reg[i2c_index - I2C_ADMIN_FIRST];
 		    }

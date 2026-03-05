@@ -16,7 +16,7 @@ execute_process(COMMAND ${CMAKE_C_COMPILER} --version OUTPUT_VARIABLE GCC_VERSIO
 string(REGEX MATCH "([0-9]+\\.[0-9]+)" GCC_MAJOR_MINOR_VERSION "${GCC_VERSION_OUTPUT}")
 message(STATUS "Detected GCC Version: ${GCC_MAJOR_MINOR_VERSION}")
 if (GCC_MAJOR_MINOR_VERSION VERSION_LESS "14.2")
-    message(FATAL_ERROR "GCC version ${GCC_MAJOR_MINOR_VERSION} is too old. Please use GCC 12.0 or newer.")
+    message(FATAL_ERROR "GCC version ${GCC_MAJOR_MINOR_VERSION} is too old. Please use GCC 14.2 or newer.")
 endif()
 
 if (PICO_SDK_VERSION_STRING VERSION_LESS "2.0.0")

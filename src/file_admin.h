@@ -12,6 +12,7 @@
 #define ADMIN_STATUS_INVALID_PACKET         0x04
 #define ADMIN_STATUS_FILE_TOO_LARGE         0x05
 #define ADMIN_STATUS_INVALID_DIRECTORY      0x06
+#define ADMIN_STATUS_BUSY                   0xFE
 
 /*
  * File operation limits

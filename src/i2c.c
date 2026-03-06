@@ -3,6 +3,7 @@
 #include <pico/binary_info.h>
 #include <hardware/i2c.h>
 #include <hardware/powman.h>
+#include <hardware/sync.h>
 #include <pico/i2c_slave.h>
 #include <tusb.h>
 
@@ -104,6 +105,20 @@ int upload_buffer_index = 0;
 static bool upload_buffer_overflow = false;
 static size_t upload_buffer_len = 0;
 
+typedef struct {  // Pending command snapshot
+    uint8_t dir;
+    uint8_t pwd;
+    uint8_t cmd;
+    bool valid;
+} AdminCommandPending;
+
+static volatile bool admin_cmd_pending = false;
+static volatile bool admin_cmd_running = false;
+static AdminCommandPending admin_cmd = {0};
+
+static void queue_admin_command(uint8_t dir, uint8_t pwd, uint8_t cmd);
+static void run_admin_command_deferred(uint8_t dir, uint8_t pwd, uint8_t cmd);
+
 const char *dir_names[DIRECTORY_COUNT + 1] = {
     "[NONE]",       // 0: DIRECTORY_NONE
     "/",            // 1: DIRECTORY_ROOT
@@ -141,61 +156,103 @@ uint8_t calculate_crc8(const uint8_t *data, size_t len) {
 }
 
 
+
 // Prepare the file list for directory and put it into the download buffer
-void pack_file_list(int dir) {
-    if (dir > 0 && dir <= DIRECTORY_COUNT) {
-        int index = 0;
-        download_buffer[index++] = PACKET_BEGIN;
-        bool sp = true;
-        FRESULT fr;
-        DIR dj;
-        FILINFO fno;
-        fr = f_opendir(&dj, dir_names[dir]);
-        if (fr == FR_OK) {
-            debug_log("Listing files in directory: %s\n", dir_names[dir]);
-            while (true) {
-                fr = f_readdir(&dj, &fno);
-                if (fr != FR_OK || fno.fname[0] == 0) {
-                    break;
-                }
-                if (!(fno.fattrib & AM_DIR)) {
-                    if (fno.fname[0] == '.') {
-                        continue; // Skip file name starts with '.'
-                    }
-                    if (!sp) {
-                        download_buffer[index++] = PACKET_DELIMITER;
-                    }
-                    int len = strlen(fno.fname);
-                    if (index + len + 3 >= DOWNLOAD_BUFFER_SIZE) { // +3 for delimiter, CRC, END
-                        debug_log("Buffer is full and skip 1 or more files.\n");
-                        break;
-                    }
-                    strncpy((char *)(download_buffer + index), fno.fname, len);
-                    index += len;
-                    sp = false;
-                }
-            }
-            f_closedir(&dj);
+// Packet format: <name|name|...|HH>
+// - The final '|' before HH is included in CRC calculation
+// - CRC is appended as 2 hex ASCII chars (HH)
+static uint8_t pack_file_list(uint8_t dir) {
 
-            uint8_t crc = calculate_crc8(download_buffer, index);
-            download_buffer[index++] = PACKET_DELIMITER;
-            download_buffer[index++] = crc;
-            download_buffer[index++] = PACKET_END;
+    file_admin_clear_download_state();  // Abort active chunked download session
 
-            if (index < DOWNLOAD_BUFFER_SIZE) {
-                download_buffer[index] = '\0';
-            } else {
-                download_buffer[DOWNLOAD_BUFFER_SIZE - 1] = '\0';
-            }
-        } else {
-            debug_log("Failed to open directory %s. Error code: %d\n", dir_names[dir], fr);
-            index = 0;
-            download_buffer[0] = '\0';
+    if (dir == 0 || dir > DIRECTORY_COUNT) {
+        download_buffer_len = 0;
+        download_buffer_index = 0;
+        download_buffer[0] = '\0';
+        return ADMIN_STATUS_INVALID_DIRECTORY;
+    }
+
+    int index = 0;
+    download_buffer[index++] = PACKET_BEGIN;
+
+    bool first = true;
+    FRESULT fr;
+    DIR dj;
+    FILINFO fno;
+    fr = f_opendir(&dj, dir_names[dir]);
+    if (fr != FR_OK) {
+        debug_log("Failed to open directory %s. Error code: %d\n", dir_names[dir], fr);
+        download_buffer_len = 0;
+        download_buffer_index = 0;
+        download_buffer[0] = '\0';
+        return ADMIN_STATUS_IO_ERROR;
+    }
+
+    debug_log("Listing files in directory: %s\n", dir_names[dir]);
+
+    while (true) {
+        fr = f_readdir(&dj, &fno);
+        if (fr != FR_OK || fno.fname[0] == 0) {
+            break;
+        }
+        if (fno.fattrib & AM_DIR) {
+            continue;
+        }
+        if (fno.fname[0] == '.') {
+            continue; // Skip file name starts with '.'
         }
 
-        download_buffer_len = (size_t)index;
-        download_buffer_index = 0;
+        int name_len = (int)strlen(fno.fname);
+        if (name_len <= 0) {
+            continue;
+        }
+
+        // Space check:
+        // - Optional delimiter between names: 1 byte
+        // - Name bytes: name_len
+        // - Trailer: "|HH>" => 4 bytes
+        int need = (first ? 0 : 1) + name_len + 4;
+        if (index + need >= DOWNLOAD_BUFFER_SIZE) {
+            debug_log("Buffer is full and skip 1 or more files.\n");
+            break;
+        }
+
+        if (!first) {
+            download_buffer[index++] = PACKET_DELIMITER;
+        }
+        memcpy(download_buffer + index, fno.fname, (size_t)name_len);
+        index += name_len;
+        first = false;
     }
+
+    f_closedir(&dj);
+
+    // Append "|" (delimiter before CRC)
+    if (index + 4 >= DOWNLOAD_BUFFER_SIZE) {
+        debug_log("Buffer is full and cannot append CRC.\n");
+        download_buffer_len = 0;
+        download_buffer_index = 0;
+        download_buffer[0] = '\0';
+        return ADMIN_STATUS_IO_ERROR;
+    }
+    download_buffer[index++] = PACKET_DELIMITER;
+
+    uint8_t crc = calculate_crc8(download_buffer, (size_t)index);
+    // CRC as 2 hex ASCII chars
+    static const char hex[] = "0123456789ABCDEF";
+    download_buffer[index++] = (uint8_t)hex[(crc >> 4) & 0x0F];
+    download_buffer[index++] = (uint8_t)hex[crc & 0x0F];
+    download_buffer[index++] = PACKET_END;
+
+    if (index < DOWNLOAD_BUFFER_SIZE) {
+        download_buffer[index] = '\0';
+    } else {
+        download_buffer[DOWNLOAD_BUFFER_SIZE - 1] = '\0';
+    }
+
+    download_buffer_len = (size_t)index;
+    download_buffer_index = 0;
+    return ADMIN_STATUS_OK;
 }
 
 
@@ -378,98 +435,199 @@ bool apply_schedule_script(int dir, char* filename) {
 }
 
 
+
 /**
- * Run administrative command
+ * Queue an administrative command for deferred execution in the main loop.
  *
- * @param pwd The password
- * @param cmd The command
+ * This function is called from the I2C IRQ handler when I2C_ADMIN_COMMAND is written.
+ * It MUST NOT perform any filesystem operations.
  */
-void run_admin_command() {
-	uint8_t pwd = i2c_admin_reg[I2C_ADMIN_PASSWORD - I2C_ADMIN_FIRST];
-	uint8_t cmd = i2c_admin_reg[I2C_ADMIN_COMMAND - I2C_ADMIN_FIRST];
-	uint16_t pwd_cmd = ((uint16_t)pwd << 8) | cmd;
-	switch (pwd_cmd) {
-	    case I2C_ADMIN_PWD_CMD_PRINT_PRODUCT_INFO:  // Print product name and firmware version
-			debug_log("Admin CMD: Print Product Info\n");
-	        debug_log("%s\n", PRODUCT_INFO_STR);
-	        break;
+static void queue_admin_command(uint8_t dir, uint8_t pwd, uint8_t cmd) {
+    // Reject if a previous command is still pending/running
+    if (admin_cmd_pending || admin_cmd_running) {
+        i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = ADMIN_STATUS_BUSY;
+        debug_log("Admin CMD rejected: busy (pwd=0x%02x, cmd=0x%02x)\n", pwd, cmd);
+        // Clear password/command like the old behavior
+        i2c_admin_reg[I2C_ADMIN_PASSWORD - I2C_ADMIN_FIRST] = 0;
+        i2c_admin_reg[I2C_ADMIN_COMMAND - I2C_ADMIN_FIRST] = 0;
+        return;
+    }
+
+    admin_cmd.dir = dir;
+    admin_cmd.pwd = pwd;
+    admin_cmd.cmd = cmd;
+    admin_cmd.valid = true;
+
+    // Mark context as BUSY so client can poll and know the command is accepted
+    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = ADMIN_STATUS_BUSY;
+
+    // Clear password/command
+    i2c_admin_reg[I2C_ADMIN_PASSWORD - I2C_ADMIN_FIRST] = 0;
+    i2c_admin_reg[I2C_ADMIN_COMMAND - I2C_ADMIN_FIRST] = 0;
+
+    admin_cmd_pending = true;
+}
+
+
+/**
+ * Run administrative command (deferred, in main loop context)
+ *
+ * @param dir The directory index
+ * @param pwd The password byte
+ * @param cmd The command byte
+ */
+static void run_admin_command_deferred(uint8_t dir, uint8_t pwd, uint8_t cmd) {
+    uint16_t pwd_cmd = ((uint16_t)pwd << 8) | cmd;
+    uint8_t status = ADMIN_STATUS_OK;
+
+    switch (pwd_cmd) {
+        case I2C_ADMIN_PWD_CMD_PRINT_PRODUCT_INFO:  // Print product name and firmware version
+            debug_log("Admin CMD: Print Product Info\n");
+            debug_log("%s\n", PRODUCT_INFO_STR);
+            status = ADMIN_STATUS_OK;
+            break;
+
         case I2C_ADMIN_PWD_CMD_FORMAT_DISK:         // Format the disk (all data will be gone!)
             debug_log("Admin CMD: Format Disk\n");
             tud_msc_start_stop_cb(0, 0, false, true);
             unmount_fatfs();
             flash_fatfs_init();
-			mount_fatfs();
+            mount_fatfs();
             create_default_dirs();
+            status = ADMIN_STATUS_OK;
             break;
+
         case I2C_ADMIN_PWD_CMD_RESET_RTC:           // Reset RTC (time will lose!)
             debug_log("Admin CMD: Reset RTC\n");
             set_virtual_register(I2C_VREG_RX8025_CONTROL_REGISTER, BIT_VALUE(0));
             rtc_set_timestamp(0);
+            status = ADMIN_STATUS_OK;
             break;
+
         case I2C_ADMIN_PWD_CMD_ENABLE_ID_EEPROM_WP: // Enable ID EEPROM write protection
-    		debug_log("Admin CMD: Enable ID EEPROM WP\n");
-    		id_eeprom_write_protection(true);
-    		break;
+            debug_log("Admin CMD: Enable ID EEPROM WP\n");
+            id_eeprom_write_protection(true);
+            status = ADMIN_STATUS_OK;
+            break;
+
         case I2C_ADMIN_PWD_CMD_DISABLE_ID_EEPROM_WP:// Disable ID EEPROM write protection
-    		debug_log("Admin CMD: Disable ID EEPROM WP\n");
-    		id_eeprom_write_protection(false);
-    		break;
-    	case I2C_ADMIN_PWD_CMD_RESET_CONF:          // Reset configuration to default values
-    	    debug_log("Admin CMD: Reset Conf\n");
-    	    conf_reset();
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_SYNC_CONF:           // Synchronize configuration to file
-    	    debug_log("Admin CMD: Sync Conf\n");
-    	    tud_msc_start_stop_cb(0, 0, false, true);
-    	    conf_sync();
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_SAVE_LOG:            // Save log to file
-    	    debug_log("Admin CMD: Save Log\n");
-    	    if (is_log_saving_to_file()) {
+            debug_log("Admin CMD: Disable ID EEPROM WP\n");
+            id_eeprom_write_protection(false);
+            status = ADMIN_STATUS_OK;
+            break;
+
+        case I2C_ADMIN_PWD_CMD_RESET_CONF:          // Reset configuration to default values
+            debug_log("Admin CMD: Reset Conf\n");
+            conf_reset();
+            status = ADMIN_STATUS_OK;
+            break;
+
+        case I2C_ADMIN_PWD_CMD_SYNC_CONF:           // Synchronize configuration to file
+            debug_log("Admin CMD: Sync Conf\n");
+            tud_msc_start_stop_cb(0, 0, false, true);
+            conf_sync();
+            status = ADMIN_STATUS_OK;
+            break;
+
+        case I2C_ADMIN_PWD_CMD_SAVE_LOG:            // Save log to file
+            debug_log("Admin CMD: Save Log\n");
+            if (is_log_saving_to_file()) {
                 save_logs_to_file();
             }
-			break;
+            status = ADMIN_STATUS_OK;
+            break;
+
         case I2C_ADMIN_PWD_CMD_LOAD_SCRIPT:         // Load and generate schedule script files
-    	    debug_log("Admin CMD: Load Script\n");
-    	    load_script(false);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_LIST_FILES:          // List files in specific directory
-    	    debug_log("Admin CMD: List Files\n");
-    	    pack_file_list(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_CHOOSE_SCRIPT:       // Choose schedule script
-    	    debug_log("Admin CMD: Choose Script\n");
-    	    tud_msc_start_stop_cb(0, 0, false, true);
-    	    unpack_filename(upload_buffer, upload_buffer);
-    	    debug_log("Applying script %s...\n", upload_buffer);
-    	    apply_schedule_script(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST], upload_buffer);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_PURGE_SCRIPT:        // Purge schedule script
-    	    debug_log("Admin CMD: Purge Script\n");
-    	    purge_script();
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_FILE_UPLOAD:         // Upload file to filesystem
-    	    debug_log("Admin CMD: File Upload\n");
-    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_upload(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD:       // Download file from filesystem
-    	    debug_log("Admin CMD: File Download\n");
-    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_download(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_FILE_DELETE:         // Delete file from filesystem
-    	    debug_log("Admin CMD: File Delete\n");
-    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_delete(i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST]);
-    	    break;
-    	case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD_NEXT:  // Load next chunk for chunked download
-    	    debug_log("Admin CMD: File Download Next\n");
-    	    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = file_admin_load_chunk();
-    	    break;
-    	default:
-    	    debug_log("Unknown admin command: pwd=0x%02x, cmd=0x%02x\n", pwd, cmd);
-	}
-	// Clear the password and command
-	i2c_admin_reg[I2C_ADMIN_PASSWORD - I2C_ADMIN_FIRST] = 0;
-	i2c_admin_reg[I2C_ADMIN_COMMAND - I2C_ADMIN_FIRST] = 0;
+            debug_log("Admin CMD: Load Script\n");
+            load_script(false);
+            status = ADMIN_STATUS_OK;
+            break;
+
+        case I2C_ADMIN_PWD_CMD_LIST_FILES:          // List files in specific directory
+            debug_log("Admin CMD: List Files\n");
+            status = pack_file_list(dir);
+            break;
+
+        case I2C_ADMIN_PWD_CMD_CHOOSE_SCRIPT: {     // Choose schedule script
+            debug_log("Admin CMD: Choose Script\n");
+            tud_msc_start_stop_cb(0, 0, false, true);
+
+            // Validate and unpack filename packet from upload buffer
+            if (!unpack_filename((char*)upload_buffer, (char*)upload_buffer)) {
+                debug_log("Choose script rejected: invalid packet\n");
+                status = ADMIN_STATUS_INVALID_PACKET;
+                break;
+            }
+
+            debug_log("Applying script %s...\n", upload_buffer);
+            bool ok = apply_schedule_script(dir, (char*)upload_buffer);
+            status = ok ? ADMIN_STATUS_OK : ADMIN_STATUS_IO_ERROR;
+            break;
+        }
+
+        case I2C_ADMIN_PWD_CMD_PURGE_SCRIPT:        // Purge schedule script
+            debug_log("Admin CMD: Purge Script\n");
+            purge_script();
+            status = ADMIN_STATUS_OK;
+            break;
+
+        case I2C_ADMIN_PWD_CMD_FILE_UPLOAD:         // Upload file to filesystem
+            debug_log("Admin CMD: File Upload\n");
+            status = file_admin_upload(dir);
+            break;
+
+        case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD:       // Download file from filesystem
+            debug_log("Admin CMD: File Download\n");
+            status = file_admin_download(dir);
+            break;
+
+        case I2C_ADMIN_PWD_CMD_FILE_DELETE:         // Delete file from filesystem
+            debug_log("Admin CMD: File Delete\n");
+            status = file_admin_delete(dir);
+            break;
+
+        case I2C_ADMIN_PWD_CMD_FILE_DOWNLOAD_NEXT:  // Load next chunk for chunked download
+            debug_log("Admin CMD: File Download Next\n");
+            status = file_admin_load_chunk();
+            break;
+
+        default:
+            debug_log("Unknown admin command: pwd=0x%02x, cmd=0x%02x\n", pwd, cmd);
+            status = ADMIN_STATUS_INVALID_PACKET;
+            break;
+    }
+
+    i2c_admin_reg[I2C_ADMIN_CONTEXT - I2C_ADMIN_FIRST] = status;
+}
+
+
+/**
+ * Process a queued administrative command (call from main loop).
+ *
+ * This ensures filesystem operations are not performed in I2C IRQ context.
+ */
+void i2c_process_pending_admin_command(void) {
+    if (!admin_cmd_pending) {
+        return;
+    }
+
+    // Take the pending command snapshot
+    uint32_t irq_state = save_and_disable_interrupts();
+    if (!admin_cmd_pending || !admin_cmd.valid) {
+        restore_interrupts(irq_state);
+        return;
+    }
+    AdminCommandPending cmd = admin_cmd;
+    admin_cmd_pending = false;
+    admin_cmd.valid = false;
+    admin_cmd_running = true;
+    restore_interrupts(irq_state);
+
+    run_admin_command_deferred(cmd.dir, cmd.pwd, cmd.cmd);
+
+    irq_state = save_and_disable_interrupts();
+    admin_cmd_running = false;
+    restore_interrupts(irq_state);
 }
 
 
@@ -811,9 +969,12 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 				uint8_t old_value = i2c_admin_reg[i2c_index - I2C_ADMIN_FIRST];
 				i2c_admin_reg[i2c_index - I2C_ADMIN_FIRST] = data;
 				switch (i2c_index) {
-					case I2C_ADMIN_COMMAND:     // Recived Admin command
-						run_admin_command();
-						break;
+					case I2C_ADMIN_COMMAND:     // Received Admin command (deferred)
+					queue_admin_command(
+					    i2c_admin_reg[I2C_ADMIN_DIR - I2C_ADMIN_FIRST],
+					    i2c_admin_reg[I2C_ADMIN_PASSWORD - I2C_ADMIN_FIRST],
+					    data);
+					break;
 					case I2C_ADMIN_HEARTBEAT:   // Explicitly received heartbeat
 						if (old_value != data) {
 							reset_heatbeat_checking_timer();

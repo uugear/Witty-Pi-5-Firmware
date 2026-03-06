@@ -327,6 +327,7 @@ int main() {
     // Main loop
     while (true) {
         tud_task();
+        i2c_process_pending_admin_command();  // Process deferred admin commands (FS ops outside I2C IRQ)
         process_log_task();
         process_conf_task();
 		if (!factory_reset_pending && conf_get(CONF_BOOTSEL_FTY_RST)) {

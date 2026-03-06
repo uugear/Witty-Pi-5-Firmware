@@ -209,6 +209,14 @@ void i2c_devices_init(void);
 
 
 /**
+ * Process a queued administrative command (call from main loop).
+ *
+ * This ensures filesystem operations are not performed in I2C IRQ context.
+ */
+void i2c_process_pending_admin_command(void);
+
+
+/**
  * Read data from slave device connected to internal I2C bus
  * 
  * @param addr Address of the slave device
@@ -276,11 +284,6 @@ uint8_t get_virtual_register(uint8_t index);
  */
 int8_t set_virtual_register(uint8_t index, uint8_t value);
 
-
-/**
- * Run administrative command
- */
-void run_admin_command();
 
 
 /**

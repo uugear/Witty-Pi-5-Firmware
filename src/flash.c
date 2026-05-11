@@ -196,8 +196,8 @@ bool flash_fatfs_write(int block, uint8_t *buffer, size_t buffer_size) {
             (end_addr % FLASH_SECTOR_SIZE) : FLASH_SECTOR_SIZE;
         if (sector_end_offset == 0) sector_end_offset = FLASH_SECTOR_SIZE;
         
-        // Calculate the data offset in buffer
-        uint32_t buffer_offset = (curr_sector - start_flash_sector) * FLASH_SECTOR_SIZE;
+        // Calculate the data offset in source buffer for the current flash sector
+        uint32_t buffer_offset = (curr_sector * FLASH_SECTOR_SIZE + sector_start_offset) - start_addr;
         
         // Update sector buffer acordingly
         uint32_t update_size = sector_end_offset - sector_start_offset;

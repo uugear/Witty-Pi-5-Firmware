@@ -10,10 +10,9 @@
 #include <string.h>
 
 
-// 1 FAT SECTOR = 1 FAT BLOCK = 512 Bytes
-// 1 FAT CLUSTER = 8 FAT SECTORS = 4096 Bytes
+// FAT logical sector size: 512 bytes
+// FAT cluster size: 8 sectors = 4096 bytes (same as FLASH_SECTOR_SIZE)
 
-#define FLASH_FAT_BLOCK_SIZE   4096
 #define FLASH_FAT_OFFSET       0x1F0000
 
 #define FAT_BLOCK_NUM          28672  // 14MB

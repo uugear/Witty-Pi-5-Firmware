@@ -6,9 +6,9 @@
 
 #include "gpio.h"
 
+#define TIMESTAMP_2000_01_01       946684800LL
 
 #define GPIO_RTC_INT	8
-
 
 #define ALARM_TYPE_NONE      0
 #define ALARM_TYPE_STARTUP   1
@@ -183,8 +183,9 @@ void load_and_schedule_alarm(bool startup);
  * @param min The scheduled minute
  * @param sec The scheduled second
  * @param dt Pointer to DateTime object that stores the time
+ * @return true if succeed, otherwise false
  */
-void rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, DateTime *dt);
+bool rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, DateTime *dt);
 
 
 #endif

@@ -14,8 +14,6 @@
 
 #define SYNC_TIME_INTERVAL_US      30000000
 
-#define TIMESTAMP_2000_01_01       946684800LL
-
 #define RX8025_SECONDS             0x00
 #define RX8025_MINUTES             0x01
 #define RX8025_HOURS               0x02
@@ -496,28 +494,47 @@ void rtc_set_alarm(int8_t day, int8_t hour, int8_t min, bool startup) {
  * @param min The scheduled minute
  * @param sec The scheduled second
  * @param dt Pointer to DateTime object that stores the time
+ * @return true if succeed, otherwise false
  */
-void rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, DateTime *dt) {
-    if (dt) {
-        day &= 0x7F;
-        hour &= 0x7F;
-        min &= 0x7F;
-        sec &= 0x7F;
-        
-        rtc_get_time(dt);
-        
-        if (dt->day < day) {
-            dt->month++;
-            if (dt->month > 12) {
-                dt->month = 1;
-                dt->year++;
-            }
-        }
-        dt->day = day;
-        dt->hour = hour;
-        dt->min = min;
-        dt->sec = sec;
+bool rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, DateTime *dt) {
+    if (!dt) {
+        return false;
     }
+
+    day &= 0x7F;
+    hour &= 0x7F;
+    min &= 0x7F;
+    sec &= 0x7F;
+    if (day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
+        return false;
+    }
+
+    DateTime now;
+    rtc_get_time(&now);
+
+    DateTime candidate = now;
+    candidate.day = day;
+    candidate.hour = hour;
+    candidate.min = min;
+    candidate.sec = sec;
+
+    int64_t now_ts = get_total_seconds(&now);
+    while (
+        day > get_days_in_month(candidate.year, candidate.month) ||
+        get_total_seconds(&candidate) <= now_ts
+    ) {
+        candidate.month++;
+        if (candidate.month > 12) {
+            candidate.month = 1;
+            candidate.year++;
+        }
+        candidate.day = day;
+        candidate.hour = hour;
+        candidate.min = min;
+        candidate.sec = sec;
+    }
+    *dt = candidate;
+    return true;
 }
 
 

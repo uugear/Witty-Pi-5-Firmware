@@ -60,7 +60,7 @@ void log_save_to_file(bool s2f) {
 static void ms_timestamp_to_str(int64_t ms_timestamp, char *buf) {
     int32_t millisec = ms_timestamp % 1000;
     DateTime dt;
-    timestamp_to_datetime(ms_timestamp / 1000, &dt);
+    timestamp_to_datetime(ms_timestamp / 1000 - TIMESTAMP_2000_01_01, &dt);
 	sprintf(buf, "%02d-%02d %02d:%02d:%02d.%03d", dt.month, dt.day, dt.hour, dt.min, dt.sec, millisec);
 }
 

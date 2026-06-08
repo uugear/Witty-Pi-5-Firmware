@@ -19,9 +19,11 @@ if (GCC_MAJOR_MINOR_VERSION VERSION_LESS "14.2")
     message(FATAL_ERROR "GCC version ${GCC_MAJOR_MINOR_VERSION} is too old. Please use GCC 14.2 or newer.")
 endif()
 
-if (PICO_SDK_VERSION_STRING VERSION_LESS "2.0.0")
-    message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.0.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
+if (PICO_SDK_VERSION_STRING VERSION_LESS "2.2.0")
+    message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.2.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
 endif()
+
+add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
 
 pico_sdk_init()
 

@@ -33,6 +33,9 @@
 // Avoid a zero-delay POWMAN alarm loop if the configuration is invalid.
 #define HIBERNATE_MIN_PULSE_INTERVAL_S  1u
 
+#define HIBERNATE_I2C_SDA_GPIO  6
+#define HIBERNATE_I2C_SCL_GPIO  7
+
 static powman_power_state off_state;
 static powman_power_state on_state;
 static uint32_t last_wakeup_flags = WAKEUP_SOURCE_RESET;
@@ -113,6 +116,31 @@ static void hibernate_prepare_usb_for_sleep(void) {
 
     stdio_flush();
     stdio_deinit_all();
+}
+
+static void hibernate_release_i2c_bus(void) {
+    gpio_set_function(HIBERNATE_I2C_SDA_GPIO, GPIO_FUNC_SIO);
+    gpio_set_function(HIBERNATE_I2C_SCL_GPIO, GPIO_FUNC_SIO);
+
+    gpio_set_dir(HIBERNATE_I2C_SDA_GPIO, GPIO_IN);
+    gpio_set_dir(HIBERNATE_I2C_SCL_GPIO, GPIO_IN);
+
+    gpio_disable_pulls(HIBERNATE_I2C_SDA_GPIO);
+    gpio_disable_pulls(HIBERNATE_I2C_SCL_GPIO);
+
+    gpio_set_input_enabled(HIBERNATE_I2C_SDA_GPIO, false);
+    gpio_set_input_enabled(HIBERNATE_I2C_SCL_GPIO, false);
+}
+
+static void hibernate_restore_i2c_bus(void) {
+    gpio_set_input_enabled(HIBERNATE_I2C_SDA_GPIO, true);
+    gpio_set_input_enabled(HIBERNATE_I2C_SCL_GPIO, true);
+
+    gpio_pull_up(HIBERNATE_I2C_SDA_GPIO);
+    gpio_pull_up(HIBERNATE_I2C_SCL_GPIO);
+
+    gpio_set_function(HIBERNATE_I2C_SDA_GPIO, GPIO_FUNC_I2C);
+    gpio_set_function(HIBERNATE_I2C_SCL_GPIO, GPIO_FUNC_I2C);
 }
 
 uint32_t hibernate_get_active_gpio_flags(void) {
@@ -285,10 +313,13 @@ int hibernate_enter(void) {
 
     hibernate_prepare_usb_for_sleep();
 
+    hibernate_release_i2c_bus();
+
     int rc = powman_set_power_state(off_state);
     if (rc != PICO_OK) {
         hibernating = false;
         powman_hw->scratch[HIBERNATE_SCRATCH_CONTEXT] = 0;
+        hibernate_restore_i2c_bus();
         return rc;
     }
 

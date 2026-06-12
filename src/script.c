@@ -31,6 +31,20 @@ typedef struct {
 
 bool script_in_use = false;
 
+static bool schedule_processed_this_boot = false;
+
+void schedule_mark_processed_this_boot(void) {
+    schedule_processed_this_boot = true;
+}
+
+void schedule_clear_processed_this_boot(void) {
+    schedule_processed_this_boot = false;
+}
+
+bool schedule_was_processed_this_boot(void) {
+    return schedule_processed_this_boot;
+}
+
 
 // Parse YYYY-MM-DD HH:mm:ss string to DateTime
 bool str_to_datetime(const char* str, DateTime* dt) {
@@ -298,9 +312,7 @@ bool set_alarm_for_action(Action * action) {
     DateTime dt;
 	timestamp_to_datetime(action->time, &dt);
 	debug_log("%s is scheduled to: %d-%02d-%02d %02d:%02d:%02d\n", action->is_up ? "Startup" : "Shutdown", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec);
-    
-    rtc_set_alarm(dt.day, dt.hour, dt.min, action->is_up);
-    
+
     if (action->is_up) {
         conf_set(CONF_ALARM1_SECOND, dec_to_bcd(dt.sec));
         conf_set(CONF_ALARM1_MINUTE, dec_to_bcd(dt.min));
@@ -312,6 +324,7 @@ bool set_alarm_for_action(Action * action) {
         conf_set(CONF_ALARM2_HOUR, dec_to_bcd(dt.hour));
         conf_set(CONF_ALARM2_DAY, dec_to_bcd(dt.day));
     }
+
     return true;
 }
 
@@ -731,7 +744,7 @@ bool load_script(bool run) {
     
     if (file_exists(SKD_SCRIPT_PATH)) {
         if (find_next_actions_from_skd(SKD_SCRIPT_PATH, cur_time, startup_first, &startup, &shutdown)) {
-            debug_log("Found future actions actions from %s\n", SKD_SCRIPT_PATH);
+            debug_log("Found future actions from %s\n", SKD_SCRIPT_PATH);
         } else {
             debug_log("No future action is found in script.\n");
             return false;
@@ -765,7 +778,11 @@ bool load_script(bool run) {
     }
 	
 	set_script_in_use(success);
-	
+
+	if (run && success) {
+        schedule_mark_processed_this_boot();
+    }
+
     return success;
 }
 

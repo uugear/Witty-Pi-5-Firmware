@@ -37,8 +37,8 @@ int get_smbus_alert_status() {
 }
 
 
-// Callback when alert occurs
-void ts_alert_callback(void) {
+// Process temperature alert
+void ts_process_alert(void) {
     int status = -1;
     for (int i = 0; status == -1 && i < 5; i ++) {
         status = get_smbus_alert_status();
@@ -97,7 +97,7 @@ void ts_init(gpio_event_callback_t below, gpio_event_callback_t over) {
 
     below_callback = below;
     over_callback = over;
-    gpio_register_callback(GPIO_TS_INT, GPIO_IRQ_EDGE_FALL, ts_alert_callback);
+    gpio_register_callback(GPIO_TS_INT, GPIO_IRQ_EDGE_FALL, ts_process_alert);
 
 	ts_set_t_low_mc((int32_t)conf_get(CONF_BELOW_TEMP_POINT) * 1000);
 	register_item_changed_callback(CONF_BELOW_TEMP_POINT, on_temp_point_conf_changed);

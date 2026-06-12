@@ -11,7 +11,7 @@
 #include "main.h"
 
 
-#define CONF_FILE_PATH          "conf/WittyPi5.conf"
+#define CONF_FILE_PATH          "/conf/WittyPi5.conf"
 #define CONF_FILE_MAX_SIZE      CONF_MAX_KEY_LENGTH * CONF_MAX_ITEMS + CONF_MAX_ITEMS + 32
 
 #define SUPPRESS_CONF_FILE_SAVING_US    5000000
@@ -323,7 +323,7 @@ bool save_to_file(const char *path, const conf_obj_t *obj) {
     if (res == FR_OK) {
         UINT bw;
         res = f_write(&fp, data, length, &bw);
-        if (res == FR_OK && bw > 0) {
+        if (res == FR_OK && bw == (UINT)length) {
             f_sync(&fp);
             f_close(&fp);
             return true;
@@ -443,9 +443,10 @@ bool conf_set(const char *key, uint8_t value) {
 // This will discard any change made directly on the file in USB-Drive
 bool conf_save(void) {
     if (dirty) {
-    	save_to_file(CONF_FILE_PATH, &config);
-        dirty = false;
-        return true;
+    	if (save_to_file(CONF_FILE_PATH, &config)) {
+            dirty = false;
+            return true;
+        }
     }
     return false;
 }
@@ -489,8 +490,9 @@ void conf_sync(void) {
         }
     }
     if (conf_save()) {
-        f_stat(CONF_FILE_PATH, &disk_file_info);
-        debug_log("conf file info updated.\n");
+        if (f_stat(CONF_FILE_PATH, &disk_file_info) == FR_OK) {
+            debug_log("conf file info updated.\n");
+        }
     }
 }
 

@@ -13,6 +13,7 @@
 #include "led.h"
 #include "dummy_load.h"
 #include "script.h"
+#include "hibernate.h"
 
 
 #define GPIO_PI_HAS_3V3     11
@@ -277,17 +278,29 @@ bool is_rpi_powered(void) {
  */
 bool request_startup(uint8_t reason) {
     if (current_rpi_state == STATE_OFF) {
-        
+
+        hibernate_clear_forced_entry();
+
         action_reason = (reason << 4) | (action_reason & 0xF);  // Set action reason
         
 		apply_dst_if_needed();	// Apply DST if needed
 		
 		cancel_alarm(rpi_off_intermittent_task_alarm_id);
 		control_led(true, 0);
+
         debug_log("Switch to STARTING state.\n");
-        power_control_pi_power(true);
+        bool powered = power_control_pi_power(true);
+        if (!powered) {
+            debug_log("Powering Raspberry Pi failed.\n");
+            return false;
+        }
+
         system_up_alarm_id = add_alarm_in_us(SYSTEM_UP_MAX_DELAY_US, system_up_timeout_callback, NULL, true);
-          
+
+        if (reason == ACTION_REASON_VIN_RECOVER) {
+            power_clear_vin_recoverable();
+        }
+
         if (!load_script(true)) {   // Schedule next shutdown
 			load_and_schedule_alarm(false);
 		}
@@ -298,6 +311,7 @@ bool request_startup(uint8_t reason) {
         debug_log("Can not request startup at this state: %d\n", current_rpi_state);
         return false;
     }
+    return true;
 }
 
 
@@ -328,7 +342,11 @@ int64_t power_off_callback(alarm_id_t id, void *user_data) {
  */
 bool request_shutdown(bool restart, uint8_t reason) {
     if (current_rpi_state == STATE_ON) {
-        
+
+        if (!restart) {
+            hibernate_request_forced_entry();
+        }
+
         action_reason = (action_reason & 0xF0) | (reason & 0xF);  // Set action reason
         
 		request_rpi_shutdown(true);
@@ -351,6 +369,7 @@ bool request_shutdown(bool restart, uint8_t reason) {
         debug_log("Can not request shutdown at this state: %d\n", current_rpi_state);
         return false;
     }
+    return true;
 }
 
 
@@ -488,7 +507,6 @@ bool can_vin_turn_on_rpi(void) {
     		uint16_t vin = get_vin_mv();
     		if (vin >= vrec) {
     			debug_log("Vin=%dmV, Vrec=%dmV\n", vin, vrec);
-    			vin_recoverable = false;
     			return true;
     		}
     	}
@@ -540,4 +558,32 @@ bool is_rpi_3V3_on(void) {
  */
 uint8_t get_action_reason(void) {
     return action_reason;
+}
+
+
+/**
+ * Check the vin_recoverable flag (if device can be recovered by VIN)
+ *
+ * @return true or false
+ */
+bool power_is_vin_recoverable(void) {
+    return vin_recoverable;
+}
+
+
+/**
+ * Clear the vin_recoverable flag
+ */
+void power_clear_vin_recoverable(void) {
+    vin_recoverable = false;
+}
+
+
+/**
+ * Restore vin_recoverable flag after hibernation
+ *
+ * @param recoverable vin_recoverable value to be restored
+ */
+void power_restore_vin_recoverable_after_hibernate(bool recoverable) {
+    vin_recoverable = recoverable;
 }

@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 
+#define USB_MSC_AUTO_EJECT_WAIT_MS  500u
+
 /**
  * Check whether emulated USB mass storage device is mounted
  *
@@ -15,5 +17,10 @@ bool is_usb_msc_device_mounted(void);
  * Safe to call even if already ejected.
  */
 void usb_msc_ensure_ejected(void);
+
+/**
+ * Mark the MSC medium as ejected and give the USB host some time to observe the state change
+ */
+void usb_msc_mark_ejected_and_wait(uint32_t wait_ms);
 
 #endif

@@ -116,7 +116,6 @@ bool rtc_set_timestamp(int64_t timestamp);
 
 /**
  * Clear RTC alarm flag (so alarm can occur again)
- * This function also clears the type of current scheduled alarm
  */
 void rtc_clear_alarm_flag(void);
 
@@ -168,11 +167,13 @@ bool adjust_action_time_for_dst(uint64_t * p_action_ts);
 
 
 /**
- * Load scheduled shutdown from configuration and set it to RTC alarm
+ * Load scheduled shutdown/startup from configuration and set it to RTC alarm
  *
  * @param startup Whether it is for startup (false for shutdown)
+ *
+ * @return true if alarm set succesfully, otherwise false
  */
-void load_and_schedule_alarm(bool startup);
+bool load_and_schedule_alarm(bool startup);
 
 
 /**
@@ -187,5 +188,18 @@ void load_and_schedule_alarm(bool startup);
  */
 bool rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, DateTime *dt);
 
+
+/**
+ * Restore alarm type after waking up from hibernation
+ *
+ * @param type Alarm type to restore
+ */
+void rtc_restore_alarm_type_after_hibernate(uint8_t type);
+
+
+/**
+ * Process pending alarm configuration at correct moment
+ */
+void rtc_process_pending_alarm_conf(void);
 
 #endif

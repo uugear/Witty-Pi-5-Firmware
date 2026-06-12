@@ -7,6 +7,7 @@
 #include "fatfs_disk.h"
 #include "flash.h"
 #include "log.h"
+#include "usb_msc_device.h"
 
 
 typedef struct {
@@ -55,7 +56,7 @@ DRESULT disk_read(BYTE drv, BYTE *buff, LBA_t sector, UINT count) {
 
 DRESULT disk_write(BYTE drv, const BYTE *buff, LBA_t sector, UINT count) {
     
-    tud_msc_start_stop_cb(0, 0, false, true);   // Eject USB MSC device first
+    usb_msc_ensure_ejected();   // Eject USB MSC device first
     
     flash_fatfs_write(sector, (uint8_t *)buff, FAT_BLOCK_SIZE * count);
     

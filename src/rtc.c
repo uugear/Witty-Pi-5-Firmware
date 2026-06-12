@@ -10,9 +10,12 @@
 #include "main.h"
 #include "conf.h"
 #include "util.h"
+#include "script.h"
 
 
 #define SYNC_TIME_INTERVAL_US      30000000
+
+#define RTC_ALARM_CONF_APPLY_DELAY_MS   100u
 
 #define RX8025_SECONDS             0x00
 #define RX8025_MINUTES             0x01
@@ -78,6 +81,10 @@ const uint8_t days_in_month[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 
 
 alarm_id_t sync_timer_alarm_id = -1;
 
+static bool alarm1_conf_changed_pending = false;
+static bool alarm2_conf_changed_pending = false;
+static absolute_time_t alarm_conf_apply_after;
+static bool alarm_conf_apply_scheduled = false;
 
 static inline bool is_pow_2(uint8_t n) {
     if (n == 0) return false;
@@ -239,49 +246,61 @@ int64_t sync_time_callback(alarm_id_t id, void *user_data) {
 }
 
 
+static void rtc_apply_alarm1_conf(void) {
+    int date = bcd_to_dec(conf_get(CONF_ALARM1_DAY));
+	int hour = bcd_to_dec(conf_get(CONF_ALARM1_HOUR));
+	int minute = bcd_to_dec(conf_get(CONF_ALARM1_MINUTE));
+	int second = bcd_to_dec(conf_get(CONF_ALARM1_SECOND));
+	if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
+		debug_log("Clear Alarm1\n");
+		rtc_set_alarm(0, 0, 0, true);
+	} else {
+		DateTime dt;
+		rtc_get_scheduled_time(date, hour, minute, second, &dt);
+		int64_t ts = get_total_seconds(&dt);
+		if (adjust_action_time_for_dst(&ts)) {
+			timestamp_to_datetime(ts, &dt);
+		}
+		debug_log("Set Alarm1 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
+		rtc_set_alarm(dt.day, dt.hour, dt.min, true);
+	}
+}
+
+static void rtc_apply_alarm2_conf(void) {
+    int date = bcd_to_dec(conf_get(CONF_ALARM2_DAY));
+	int hour = bcd_to_dec(conf_get(CONF_ALARM2_HOUR));
+	int minute = bcd_to_dec(conf_get(CONF_ALARM2_MINUTE));
+	int second = bcd_to_dec(conf_get(CONF_ALARM2_SECOND));
+	if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
+		debug_log("Clear Alarm2\n");
+		rtc_set_alarm(0, 0, 0, false);
+	} else {
+		DateTime dt;
+		rtc_get_scheduled_time(date, hour, minute, second, &dt);
+		int64_t ts = get_total_seconds(&dt);
+		if (adjust_action_time_for_dst(&ts)) {
+			timestamp_to_datetime(ts, &dt);
+		}
+		debug_log("Set Alarm2 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
+		rtc_set_alarm(dt.day, dt.hour, dt.min, false);
+	}
+}
+
 // Extra processing after alarm configuration is changed
 void on_alarm_conf_changed(const char *key, uint8_t old_val, uint8_t new_val) {
 	if (current_rpi_state == STATE_STOPPING || current_rpi_state == STATE_OFF) {
 		if (strcmp(key, CONF_ALARM1_MINUTE) == 0 || strcmp(key, CONF_ALARM1_HOUR) == 0 || strcmp(key, CONF_ALARM1_DAY) == 0) {
-			int date = bcd_to_dec(conf_get(CONF_ALARM1_DAY));
-			int hour = bcd_to_dec(conf_get(CONF_ALARM1_HOUR));
-			int minute = bcd_to_dec(conf_get(CONF_ALARM1_MINUTE));
-			int second = bcd_to_dec(conf_get(CONF_ALARM1_SECOND));
-			if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
-				debug_log("Clear Alarm1\n");
-				rtc_set_alarm(0, 0, 0, true);
-			} else {
-				DateTime dt;
-				rtc_get_scheduled_time(date, hour, minute, second, &dt);
-				int64_t ts = get_total_seconds(&dt);
-				if (adjust_action_time_for_dst(&ts)) {
-					timestamp_to_datetime(ts, &dt);
-				}
-				debug_log("Set Alarm1 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
-				rtc_set_alarm(dt.day, dt.hour, dt.min, true);
-			}
+		   alarm1_conf_changed_pending = true;
 		}
 	} else if (current_rpi_state == STATE_STARTING || current_rpi_state == STATE_ON) {
 		if (strcmp(key, CONF_ALARM2_MINUTE) == 0 || strcmp(key, CONF_ALARM2_HOUR) == 0 || strcmp(key, CONF_ALARM2_DAY) == 0) {
-			int date = bcd_to_dec(conf_get(CONF_ALARM2_DAY));
-			int hour = bcd_to_dec(conf_get(CONF_ALARM2_HOUR));
-			int minute = bcd_to_dec(conf_get(CONF_ALARM2_MINUTE));
-			int second = bcd_to_dec(conf_get(CONF_ALARM2_SECOND));
-			if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
-				debug_log("Clear Alarm2\n");
-				rtc_set_alarm(0, 0, 0, false);
-			} else {
-				DateTime dt;
-				rtc_get_scheduled_time(date, hour, minute, second, &dt);
-				int64_t ts = get_total_seconds(&dt);
-				if (adjust_action_time_for_dst(&ts)) {
-					timestamp_to_datetime(ts, &dt);
-				}
-				debug_log("Set Alarm2 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
-				rtc_set_alarm(dt.day, dt.hour, dt.min, false);
-			}
+            alarm2_conf_changed_pending = true;
 		}
 	}
+	if (alarm1_conf_changed_pending || alarm2_conf_changed_pending) {
+        alarm_conf_apply_after = make_timeout_time_ms(RTC_ALARM_CONF_APPLY_DELAY_MS);
+        alarm_conf_apply_scheduled = true;
+    }
 }
 
 
@@ -432,10 +451,10 @@ int64_t sync_powman_timer_callback(alarm_id_t id, void *user_data) {
     bool rtc_time_is_valid;
 	uint64_t ts = rtc_get_timestamp(&rtc_time_is_valid);
 	if (rtc_time_is_valid) {
-	    debug_log("Write RTC time to POWMAN timer.\n");
+	    //debug_log("Write RTC time to POWMAN timer.\n");
 		powman_timer_set_ms((ts + TIMESTAMP_2000_01_01) * 1000);
 	} else {
-	    debug_log("Write POWMAN time to RTC.\n");
+	    //debug_log("Write POWMAN time to RTC.\n");
 		rtc_set_timestamp(powman_timer_get_ms() / 1000 - TIMESTAMP_2000_01_01);
 	}
     return 0;
@@ -453,14 +472,11 @@ void rtc_sync_powman_timer(void) {
 
 /**
  * Clear RTC alarm flag (so alarm can occur again)
- * This function also clears the type of current scheduled alarm
  */
 void rtc_clear_alarm_flag(void) {
     uint8_t status = get_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER);
     set_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER, (status & (~BIT_VALUE(AF))));
-    alarm_type = ALARM_TYPE_NONE;
 }
-
 
 
 /**
@@ -791,29 +807,77 @@ bool adjust_action_time_for_dst(uint64_t * p_action_ts) {
 
 
 /**
- * Load scheduled shutdown from configuration and set it to RTC alarm
+ * Load scheduled shutdown/startup from configuration and set it to RTC alarm
  *
  * @param startup Whether it is for startup (false for shutdown)
+ *
+ * @return true if alarm set succesfully, otherwise false
  */
-void load_and_schedule_alarm(bool startup) {
-	bool valid;
-	int64_t cur_ts = rtc_get_timestamp(&valid);
-	if (valid) {
-		uint8_t sec = bcd_to_dec(conf_get(startup ? CONF_ALARM1_SECOND : CONF_ALARM2_SECOND));
-		uint8_t min = bcd_to_dec(conf_get(startup ? CONF_ALARM1_MINUTE : CONF_ALARM2_MINUTE));
-		uint8_t hour = bcd_to_dec(conf_get(startup ? CONF_ALARM1_HOUR : CONF_ALARM2_HOUR));
-		uint8_t day = bcd_to_dec(conf_get(startup ? CONF_ALARM1_DAY : CONF_ALARM2_DAY));
-		DateTime dt;
-		rtc_get_scheduled_time(day, hour, min, sec, &dt);
-		int64_t scheduled_ts = get_total_seconds(&dt);
-		if (cur_ts < scheduled_ts) {
-			if (adjust_action_time_for_dst(&scheduled_ts)) {
-				timestamp_to_datetime(scheduled_ts, &dt);
-				rtc_set_alarm(dt.day, dt.hour, dt.min, startup);
-			} else {
-				rtc_set_alarm(day, hour, min, startup);
-				debug_log("Set Alarm %02d %02d:%02d for %s\n", day, hour, min, startup ? "startup" : "shutdown");
-			}
-		}
-	}
+bool load_and_schedule_alarm(bool startup) {
+    bool valid;
+    int64_t cur_ts = rtc_get_timestamp(&valid);
+    if (!valid) {
+        return false;
+    }
+
+    uint8_t sec = bcd_to_dec(conf_get(startup ? CONF_ALARM1_SECOND : CONF_ALARM2_SECOND));
+    uint8_t min = bcd_to_dec(conf_get(startup ? CONF_ALARM1_MINUTE : CONF_ALARM2_MINUTE));
+    uint8_t hour = bcd_to_dec(conf_get(startup ? CONF_ALARM1_HOUR : CONF_ALARM2_HOUR));
+    uint8_t day = bcd_to_dec(conf_get(startup ? CONF_ALARM1_DAY : CONF_ALARM2_DAY));
+
+    DateTime dt;
+    if (!rtc_get_scheduled_time(day, hour, min, sec, &dt)) {
+        return false;
+    }
+
+    int64_t scheduled_ts = get_total_seconds(&dt);
+    if (cur_ts >= scheduled_ts) {
+        return false;
+    }
+
+    if (adjust_action_time_for_dst(&scheduled_ts)) {
+        timestamp_to_datetime(scheduled_ts, &dt);
+        rtc_set_alarm(dt.day, dt.hour, dt.min, startup);
+    } else {
+        rtc_set_alarm(day, hour, min, startup);
+        debug_log("Set Alarm %02d %02d:%02d for %s\n",
+                  day, hour, min, startup ? "startup" : "shutdown");
+    }
+
+    schedule_mark_processed_this_boot();
+    return true;
+}
+
+
+/**
+ * Restore alarm type after waking up from hibernation
+ *
+ * @param type Alarm type to restore
+ */
+void rtc_restore_alarm_type_after_hibernate(uint8_t type) {
+    if (type == ALARM_TYPE_NONE || type == ALARM_TYPE_STARTUP || type == ALARM_TYPE_SHUTDOWN) {
+        alarm_type = type;
+    }
+}
+
+
+/**
+ * Process pending alarm configuration at correct moment
+ */
+void rtc_process_pending_alarm_conf(void) {
+    if (!alarm_conf_apply_scheduled || !time_reached(alarm_conf_apply_after)) {
+        return;
+    }
+
+    alarm_conf_apply_scheduled = false;
+
+    if (alarm1_conf_changed_pending) {
+        alarm1_conf_changed_pending = false;
+        rtc_apply_alarm1_conf();
+    }
+
+    if (alarm2_conf_changed_pending) {
+        alarm2_conf_changed_pending = false;
+        rtc_apply_alarm2_conf();
+    }
 }

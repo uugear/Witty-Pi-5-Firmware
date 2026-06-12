@@ -25,6 +25,7 @@
 #include "id_eeprom.h"
 #include "util.h"
 #include "bootsel_button.h"
+#include "hibernate.h"
 
 
 #define VOLTAGE_CHECK_INTERVAL_US	1000000
@@ -217,6 +218,11 @@ int64_t retry_below_temp_startup_callback(alarm_id_t id, void *user_data) {
 // Perform temperature action
 void perform_temp_action(uint8_t action, bool below, bool retry) {
 	if (action == TEMP_ACTION_STARTUP) {
+	    if (current_rpi_state == STATE_ON || current_rpi_state == STATE_STARTING) {
+            debug_log("%s-temperature startup is ignored because Raspberry Pi is already on.\n",
+                      below ? "Below" : "Over");
+            return;
+        }
 		bool vin_cond = !can_vin_turn_off_rpi();
 		bool time_cond = !can_cur_time_turn_off_rpi();
 		bool state_cond = current_rpi_state == STATE_OFF;
@@ -224,15 +230,17 @@ void perform_temp_action(uint8_t action, bool below, bool retry) {
 		    debug_log("%s-temperature startup %s.\n", below ? "Below" : "Over", retry ? "succeeds with retry" : "occurs");
 			request_startup(below ? ACTION_REASON_BELOW_TEMPERATURE : ACTION_REASON_OVER_TEMPERATURE);
 		} else {
-			debug_log("%s-temperature startup is postponed %s (reason: %s%s%s).\n",
-			    retry ? "again" : "",
+			debug_log("%s-temperature startup is postponed %s(reason: %s%s%s).\n",
 				below ? "Below" : "Over",
-			    vin_cond ? "" : "Vin", time_cond ? "" : "schedule", state_cond ? "" : "RPi state");
+			    retry ? "again " : "",
+			    vin_cond ? "" : "Vin",
+			    time_cond ? "" : "schedule",
+			    state_cond ? "" : "RPi state");
 			cancel_alarm(postponed_action_alarm_id);
 			postponed_action_alarm_id = add_alarm_in_us(ACTION_RETRY_INTERVAL_US,
-			                                            below ? retry_below_temp_startup_callback : retry_over_temp_startup_callback,
-			                                            NULL,
-			                                            true);
+                                                        below ? retry_below_temp_startup_callback : retry_over_temp_startup_callback,
+                                                        NULL,
+                                                        true);
 		}
 	} else if (action == TEMP_ACTION_SHUTDOWN) {
 		debug_log("%s-temperature shutdown occurs.\n", below ? "Below" : "Over");
@@ -302,6 +310,42 @@ int main() {
 
 	led_init();	// Initialize LED controller
 
+	hibernate_init();   // Initialize hibernation manager
+	if (hibernate_was_resumed()) {
+
+    	uint32_t wake_flags = hibernate_get_wakeup_flags();
+
+        if (wake_flags & WAKEUP_SOURCE_BUTTON) {
+            debug_log("Woke up by button.\n");
+            request_startup(ACTION_REASON_BUTTON_CLICK);
+        } else if (wake_flags & WAKEUP_SOURCE_RTC) {
+            debug_log("Woke up by RTC alarm.\n");
+            rtc_alarm_occuried_callback();
+            rtc_clear_alarm_flag();
+        } else if (wake_flags & WAKEUP_SOURCE_TS) {
+            debug_log("Woke up by temperature alert.\n");
+            ts_process_alert();
+        } else if (wake_flags & WAKEUP_SOURCE_TIMER) {
+            //debug_log("Woke up by pulse timer.\n");
+            uint8_t task_time = rpi_off_intermittent_task();
+            sleep_ms(task_time);
+        
+            if (can_vin_turn_on_rpi()
+                && !can_cur_time_turn_off_rpi()
+                && !can_temperature_turn_off_rpi()) {
+                request_startup(ACTION_REASON_VIN_RECOVER);
+            } else {
+                // Do not expose USB MSC/CDC again for timer-only pulse wake.
+                // Re-enter POWMAN hibernation before board_init()/tud_init().
+                hibernate_skip_usb_grace();
+                int rc = hibernate_enter();
+                if (rc != PICO_OK) {
+                    debug_log("Failed to re-enter hibernation after pulse wake: %d\n", rc);
+                }
+            }
+        }
+    }
+    
     board_init();
     tud_init(BOARD_TUD_RHPORT);
 
@@ -317,9 +361,11 @@ int main() {
 	}
 
     // Process schedule script or schedule shutdown as per configuration
-	if (!load_script(true)) {
-		load_and_schedule_alarm(current_rpi_state == STATE_OFF || current_rpi_state == STATE_STOPPING);
-	}
+    if (!schedule_was_processed_this_boot()) {
+        if (!load_script(true)) {
+            load_and_schedule_alarm(current_rpi_state == STATE_OFF || current_rpi_state == STATE_STOPPING);
+        }
+    }
 
     // Keep checking voltage
     add_alarm_in_us(VOLTAGE_CHECK_INTERVAL_US, voltage_check_callback, NULL, true);
@@ -328,10 +374,20 @@ int main() {
     while (true) {
         tud_task();
         i2c_process_pending_admin_command();  // Process deferred admin commands (FS ops outside I2C IRQ)
+        rtc_process_pending_alarm_conf();  // Process deferred alarm configurations
         process_log_task();
         process_conf_task();
 		if (!factory_reset_pending && conf_get(CONF_BOOTSEL_FTY_RST)) {
 			check_bootsel_button(NULL, NULL, bootsel_long_pressed_callback);
 		}
+		if (current_rpi_state == STATE_OFF) {
+    		if (hibernate_is_forced_entry_requested() || hibernate_can_enter()) {
+    		    debug_log("Entering hibernation...\n");
+                int rc = hibernate_enter();
+                if (rc != PICO_OK) {
+                    debug_log("Failed to enter hibernation: %d\n", rc);
+                }
+            }
+        }
     }
 }

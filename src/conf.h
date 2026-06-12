@@ -40,9 +40,9 @@
 #define CONF_ALARM2_HOUR        "ALARM2_HOUR"       // Hour_alarm register for shutdown alarm (BCD format)
 #define CONF_ALARM2_DAY         "ALARM2_DAY"        // Day_alarm register for shutdown alarm (BCD format)
 
-#define CONF_BELOW_TEMP_ACTION  "BELOW_TEMP_ACTION" // Action for below temperature: 0-do nothing; 1-shutdown; 2-startup
+#define CONF_BELOW_TEMP_ACTION  "BELOW_TEMP_ACTION" // Action for below temperature: 0-do nothing; 1-startup; 2-shutdown
 #define CONF_BELOW_TEMP_POINT   "BELOW_TEMP_POINT"  // Set point for below temperature (signed degrees of Celsius)
-#define CONF_OVER_TEMP_ACTION   "OVER_TEMP_ACTION"  // Action for over temperature: 0-do nothing; 1-shutdown; 2-startup
+#define CONF_OVER_TEMP_ACTION   "OVER_TEMP_ACTION"  // Action for over temperature: 0-do nothing; 1-startup; 2-shutdown
 #define CONF_OVER_TEMP_POINT    "OVER_TEMP_POINT"   // Set point for over temperature (signed degrees of Celsius)
 
 #define CONF_DST_OFFSET         "DST_OFFSET"        // b7=mode; b6~b0: DST offset in minute, default=0(disable DST)

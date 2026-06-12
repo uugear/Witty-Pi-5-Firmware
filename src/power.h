@@ -128,4 +128,24 @@ bool is_rpi_3V3_on(void);
 uint8_t get_action_reason(void);
 
 
+/**
+ * Check the vin_recoverable flag (if device can be recovered by VIN)
+ *
+ * @return true or false
+ */
+bool power_is_vin_recoverable(void);
+
+
+/**
+ * Clear the vin_recoverable flag
+ */
+void power_clear_vin_recoverable(void);
+
+/**
+ * Restore vin_recoverable flag after hibernation
+ *
+ * @param recoverable vin_recoverable value to be restored
+ */
+void power_restore_vin_recoverable_after_hibernate(bool recoverable);
+
 #endif

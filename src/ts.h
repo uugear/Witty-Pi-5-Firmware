@@ -78,4 +78,9 @@ void ts_set_t_high_mc(int32_t th);
 bool can_temperature_turn_off_rpi(void);
 
 
+/**
+ * Process temperature alert
+ */
+void ts_process_alert(void);
+
 #endif

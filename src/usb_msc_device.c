@@ -217,3 +217,18 @@ void usb_msc_ensure_ejected(void) {
         tud_msc_start_stop_cb(0, 0, false, true);
     }
 }
+
+
+/**
+ * Mark the MSC medium as ejected and give the USB host some time to observe the state change
+ */
+void usb_msc_mark_ejected_and_wait(uint32_t wait_ms) {
+    // Not the same as a host-side "safe eject", but it prevents further host read/write access.
+    usb_msc_ensure_ejected();
+
+    absolute_time_t until = make_timeout_time_ms(wait_ms);
+    while (!time_reached(until)) {
+        tud_task();
+        sleep_ms(1);
+    }
+}

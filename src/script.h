@@ -98,4 +98,23 @@ void set_script_in_use(bool in_use);
 bool is_script_in_use(void);
 
 
+/**
+ * Mark the schedule script processed state in this boot
+ */
+void schedule_mark_processed_this_boot(void);
+
+
+/**
+ * Clear the schedule script processed state in this boot
+ */
+void schedule_clear_processed_this_boot(void);
+
+
+/**
+ * Whether the schedule script was processed in this boot
+ * 
+ * @return true or false
+ */
+bool schedule_was_processed_this_boot(void);
+
 #endif

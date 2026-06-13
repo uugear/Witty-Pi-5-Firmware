@@ -774,7 +774,11 @@ void set_config_register(uint8_t index, uint8_t value) {
 			break;
 
 	    case I2C_CONF_PS_PRIORITY:
-	        conf_set(CONF_PS_PRIORITY, value);
+            if (value == POWER_SOURCE_PRIORITY_VUSB || value == POWER_SOURCE_PRIORITY_VIN) {
+                conf_set(CONF_PS_PRIORITY, value);
+            } else {
+                debug_log("Invalid power source priority ignored: %d\n", value);
+            }
 	        break;
 
         case I2C_CONF_ADJ_VUSB:

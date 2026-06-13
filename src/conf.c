@@ -83,6 +83,25 @@ static bool dirty = false;
 FILINFO disk_file_info;
 
 
+static bool conf_sanitize(conf_obj_t *obj) {
+    if (!obj) {
+        return false;
+    }
+    for (int i = 0; i < obj->count; i++) {
+        if (strcmp(obj->items[i].key, CONF_PS_PRIORITY) == 0) {
+            uint8_t value = obj->items[i].value;
+            if (value != 0 && value != 1) {
+                debug_log("Invalid PS_PRIORITY=%d, reset to default 0.\n", value);
+                obj->items[i].value = 0;
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+
 // Copy configuration from one to another
 bool copy_config(conf_obj_t *dest, conf_obj_t *src) {
 
@@ -371,7 +390,12 @@ void conf_init(void) {
             }
         }
     }
-    
+
+    // Sanitize loaded configuration values
+    if (conf_sanitize(&config)) {
+        dirty = true;
+    }
+
     // Make an original copy
     copy_config(&original_config, &config);
     
@@ -485,6 +509,9 @@ void conf_sync(void) {
                         conf_set_to(&disk_config, key, value);
                     }
                 }
+            }
+            if (conf_sanitize(&disk_config)) {
+                dirty = true;
             }
             copy_config(&config, &disk_config);
         }

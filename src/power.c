@@ -57,6 +57,19 @@ bool vin_recoverable = false;
 uint8_t action_reason = 0;
 
 
+static uint8_t power_get_valid_source_priority(void) {
+    uint8_t priority = conf_get(CONF_PS_PRIORITY);
+
+    if (priority == POWER_SOURCE_PRIORITY_VUSB || priority == POWER_SOURCE_PRIORITY_VIN) {
+        return priority;
+    }
+
+    debug_log("Invalid power source priority: %d, fallback to Vusb first.\n", priority);
+    conf_set(CONF_PS_PRIORITY, POWER_SOURCE_PRIORITY_VUSB);
+    return POWER_SOURCE_PRIORITY_VUSB;
+}
+
+
 // Callback when system up timeout
 int64_t system_up_timeout_callback(alarm_id_t id, void *user_data) {
 	control_led(false, 0);
@@ -152,7 +165,7 @@ void power_init(void) {
     gpio_put(GPIO_PI_POWER_CTRL, false);
     
     // Turn on DC/DC converter, if VIN has priority
-    gpio_put(GPIO_DCDC_ENABLE, conf_get(CONF_PS_PRIORITY) == POWER_SOURCE_PRIORITY_VIN);
+    gpio_put(GPIO_DCDC_ENABLE, power_get_valid_source_priority() == POWER_SOURCE_PRIORITY_VIN);
 	
 	schedule_rpi_off_intermittent_task();
 }
@@ -171,7 +184,7 @@ bool power_control_pi_power(bool on) {
             debug_log("Can not turn on: Pi power is already on.\n");
             return false;
         }
-        uint8_t priority = conf_get(CONF_PS_PRIORITY);
+        uint8_t priority = power_get_valid_source_priority();
         if (priority == POWER_SOURCE_PRIORITY_VUSB) {   // VUSB has priority
             uint16_t vusb = get_vusb_mv();
             if (vusb >= MIN_VUSB_MV) {  // Vusb is high enough
@@ -244,7 +257,7 @@ bool power_control_pi_power(bool on) {
         }
 		request_rpi_shutdown(false);
         gpio_put(GPIO_PI_POWER_CTRL, false);
-		gpio_put(GPIO_DCDC_ENABLE, conf_get(CONF_PS_PRIORITY) == POWER_SOURCE_PRIORITY_VIN);
+		gpio_put(GPIO_DCDC_ENABLE, power_get_valid_source_priority() == POWER_SOURCE_PRIORITY_VIN);
 		power_mode = POWER_MODE_NONE;
         current_rpi_state = STATE_OFF;
         debug_log("Switch to OFF state.\n");
@@ -292,6 +305,8 @@ bool request_startup(uint8_t reason) {
         bool powered = power_control_pi_power(true);
         if (!powered) {
             debug_log("Powering Raspberry Pi failed.\n");
+            control_led(false, 0);
+            schedule_rpi_off_intermittent_task();
             return false;
         }
 
@@ -410,7 +425,7 @@ uint8_t rpi_off_intermittent_task(void) {
  */
 int power_source_polling(void) {
     
-	uint8_t priority = conf_get(CONF_PS_PRIORITY);
+	uint8_t priority = power_get_valid_source_priority();
 	
 	if (gpio_get(GPIO_PI_POWER_CTRL) == true) {     // Raspberry Pi is powered
 		

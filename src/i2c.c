@@ -731,6 +731,9 @@ uint8_t get_config_register(uint8_t index) {
 
 		case I2C_CONF_SYS_CLOCK_MHZ:
 			return conf_get(CONF_SYS_CLOCK_MHZ);
+
+        case I2C_CONF_VIN_HOT_STANDBY:
+            return conf_get(CONF_VIN_HOT_STANDBY);
     }
     return 0;
 }
@@ -879,6 +882,14 @@ void set_config_register(uint8_t index, uint8_t value) {
 		case I2C_CONF_SYS_CLOCK_MHZ:
 			conf_set(CONF_SYS_CLOCK_MHZ, value);
 			break;
+
+        case I2C_CONF_VIN_HOT_STANDBY:
+            if (value == 0 || value == 1) {
+                conf_set(CONF_VIN_HOT_STANDBY, value);
+            } else {
+                debug_log("Invalid VIN_HOT_STANDBY ignored: %d\n", value);
+            }
+            break;
     }
 }
 

@@ -58,6 +58,8 @@
 
 #define CONF_SYS_CLOCK_MHZ		"SYS_CLOCK_MHZ"		// System clock (in MHz) for RP2350: default=48 (required for USB drive and USB-uart)
 
+#define CONF_VIN_HOT_STANDBY    "VIN_HOT_STANDBY"   // Keep VIN DC/DC enabled in VUSB-first mode, 0=off, 1=on
+
 #define CONF_MAX_KEY_LENGTH    32
 #define CONF_MAX_ITEMS         64
 

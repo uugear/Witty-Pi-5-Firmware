@@ -74,8 +74,10 @@ conf_obj_t default_config = {
         {.key = CONF_DST_APPLIED, .value = 0},
 
 		{.key = CONF_SYS_CLOCK_MHZ, .value = 48},
+        
+        {.key = CONF_VIN_HOT_STANDBY, .value = 0},
     },
-    .count = 39
+    .count = 40
 };
 
 static bool dirty = false;
@@ -83,22 +85,38 @@ static bool dirty = false;
 FILINFO disk_file_info;
 
 
-static bool conf_sanitize(conf_obj_t *obj) {
-    if (!obj) {
+static bool conf_sanitize_bool_value(conf_obj_t *obj, const char *key, uint8_t default_value) {
+    if (!obj || !key) {
         return false;
     }
+
     for (int i = 0; i < obj->count; i++) {
-        if (strcmp(obj->items[i].key, CONF_PS_PRIORITY) == 0) {
+        if (strcmp(obj->items[i].key, key) == 0) {
             uint8_t value = obj->items[i].value;
             if (value != 0 && value != 1) {
-                debug_log("Invalid PS_PRIORITY=%d, reset to default 0.\n", value);
-                obj->items[i].value = 0;
+                debug_log("Invalid %s=%d, reset to default %d.\n", key, value, default_value);
+                obj->items[i].value = default_value;
                 return true;
             }
             return false;
         }
     }
+
     return false;
+}
+
+
+static bool conf_sanitize(conf_obj_t *obj) {
+    bool changed = false;
+
+    if (!obj) {
+        return false;
+    }
+
+    changed |= conf_sanitize_bool_value(obj, CONF_PS_PRIORITY, 0);
+    changed |= conf_sanitize_bool_value(obj, CONF_VIN_HOT_STANDBY, 0);
+
+    return changed;
 }
 
 

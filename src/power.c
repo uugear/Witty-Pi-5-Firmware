@@ -70,6 +70,46 @@ static uint8_t power_get_valid_source_priority(void) {
 }
 
 
+static bool power_is_vin_hot_standby_enabled(void) {
+    uint8_t value = conf_get(CONF_VIN_HOT_STANDBY);
+
+    if (value == 0) {
+        return false;
+    }
+    if (value == 1) {
+        return true;
+    }
+
+    debug_log("Invalid VIN_HOT_STANDBY: %d, fallback to 0.\n", value);
+    conf_set(CONF_VIN_HOT_STANDBY, 0);
+    return false;
+}
+
+
+static void power_ensure_dcdc_enabled(void) {
+    if (gpio_get(GPIO_DCDC_ENABLE) == false) {
+        gpio_put(GPIO_DCDC_ENABLE, true);
+        sleep_us(DCDC_ON_DELAY_US);
+    }
+}
+
+
+static void power_update_dcdc_for_vusb_mode(void) {
+    if (!power_is_vin_hot_standby_enabled()) {
+        gpio_put(GPIO_DCDC_ENABLE, false);
+        return;
+    }
+    // Do not check LOW_VOLTAGE here.
+    // Hot standby only needs VIN to be high enough for the DC/DC converter to generate 5V. 
+    uint16_t vin = get_vin_mv();
+    if (vin >= MIN_VIN_MV) {
+        power_ensure_dcdc_enabled();
+    } else {
+        gpio_put(GPIO_DCDC_ENABLE, false);
+    }
+}
+
+
 // Callback when system up timeout
 int64_t system_up_timeout_callback(alarm_id_t id, void *user_data) {
 	control_led(false, 0);
@@ -188,7 +228,7 @@ bool power_control_pi_power(bool on) {
         if (priority == POWER_SOURCE_PRIORITY_VUSB) {   // VUSB has priority
             uint16_t vusb = get_vusb_mv();
             if (vusb >= MIN_VUSB_MV) {  // Vusb is high enough
-                gpio_put(GPIO_DCDC_ENABLE, false);
+                power_update_dcdc_for_vusb_mode();
                 gpio_put(GPIO_PI_POWER_CTRL, true);
                 power_mode = POWER_MODE_VUSB;
                 current_rpi_state = STATE_STARTING;
@@ -198,14 +238,10 @@ bool power_control_pi_power(bool on) {
             } else {  // Vusb is too low
                 uint16_t vin = get_vin_mv();
                 if (vin >= MIN_VIN_MV) {    // Vin is high enough
-                    if (gpio_get(GPIO_DCDC_ENABLE) == false) {  // DC/DC is still off
-                        gpio_put(GPIO_DCDC_ENABLE, true);
-                        sleep_us(DCDC_ON_DELAY_US);
-                    }
+                    power_ensure_dcdc_enabled();
                     gpio_put(GPIO_PI_POWER_CTRL, true);
                     current_rpi_state = STATE_STARTING;
                     debug_log("Raspberry Pi is powered by Vin (%dmV).\n", vin);
-                    
 					power_mode = POWER_MODE_VIN;
                     reset_heatbeat_checking_timer();
                     return true;
@@ -218,10 +254,7 @@ bool power_control_pi_power(bool on) {
             }
         } else if (priority == POWER_SOURCE_PRIORITY_VIN) { // VIN has priority
             // Make sure DC/DC is on  
-			if (gpio_get(GPIO_DCDC_ENABLE) == false) {
-				gpio_put(GPIO_DCDC_ENABLE, true);
-				sleep_us(DCDC_ON_DELAY_US);
-			}
+			power_ensure_dcdc_enabled();
 			uint16_t vin = get_vin_mv();
 			if (vin >= MIN_VIN_MV) {    // Vin is high enough
 				gpio_put(GPIO_PI_POWER_CTRL, true);
@@ -434,43 +467,36 @@ int power_source_polling(void) {
 			uint16_t vusb = get_vusb_mv();
 			
             if (vusb >= MIN_VUSB_MV) {  // Vusb is high enough
-                gpio_put(GPIO_DCDC_ENABLE, false);
+                power_update_dcdc_for_vusb_mode();
                 power_mode = POWER_MODE_VUSB;
                 power_low_counter = 0;
                 return POWERED_BY_VUSB_NO_ACTION;
                 
             } else {  // Vusb is too low
-                
                 uint16_t vin = get_vin_mv();
-				uint16_t vlow = conf_get(CONF_LOW_VOLTAGE) * 100;
-                
-                if (vin >= MIN_VIN_MV && (vlow ==0 || vin >= vlow)) {    // Vin is high enough
-                    if (gpio_get(GPIO_DCDC_ENABLE) == false) {
-                        gpio_put(GPIO_DCDC_ENABLE, true);
-                        sleep_us(DCDC_ON_DELAY_US);
-                    }
+                uint16_t vlow = conf_get(CONF_LOW_VOLTAGE) * 100;
+                if (vin >= MIN_VIN_MV) {    // Vin is high enough
+                    power_ensure_dcdc_enabled();
 					power_mode = POWER_MODE_VIN;
-					power_low_counter = 0;
-					return POWERED_BY_VIN_NO_ACTION;
-					
-                } else {    // Vin is also too low
-                    power_low_counter ++;
-                    if (power_low_counter > MAX_POWER_LOW_COUNTER) {
-                        vin_recoverable = true;
-                        debug_log("Power low: Vusb=%dmV, Vin=%dmV, Vlow=%dmV\n", vusb, vin, vlow);
-    					request_shutdown(false, ACTION_REASON_VIN_DROP);
-    					return POWER_LOW_SHUTDOWN;
-				    }
-				    return POWER_LOW_PENDING;
+					if (vlow == 0 || vin >= vlow) {
+                        power_low_counter = 0;
+                        return POWERED_BY_VIN_NO_ACTION;
+                    }
+                } 
+                // Vin is lower than MIN_VIN_MV, or lower than Vlow
+                power_low_counter ++;
+                if (power_low_counter > MAX_POWER_LOW_COUNTER) {
+                    vin_recoverable = true;
+                    debug_log("Power low: Vusb=%dmV, Vin=%dmV, Vlow=%dmV\n", vusb, vin, vlow);
+                    request_shutdown(false, ACTION_REASON_VIN_DROP);
+                    return POWER_LOW_SHUTDOWN;
                 }
+                return POWER_LOW_PENDING;
             }
 		} else if (priority == POWER_SOURCE_PRIORITY_VIN) { // VIN has priority
-		    
-		    if (gpio_get(GPIO_DCDC_ENABLE) == false) {
-			    gpio_put(GPIO_DCDC_ENABLE, true);
-			    sleep_us(DCDC_ON_DELAY_US);
-		    }
-			
+
+		    power_ensure_dcdc_enabled();
+
 			uint16_t vin = get_vin_mv();
 			uint16_t vusb = get_vusb_mv();
 			
@@ -507,6 +533,8 @@ int power_source_polling(void) {
 		
 		return PI_NOT_POWERED;
 	}
+    
+    return PI_NOT_POWERED;
 }
 
 

@@ -6,7 +6,7 @@
 
 #define FIRMWARE_ID 			0x51
 #define FIRMWARE_VERSION_MAJOR	1
-#define FIRMWARE_VERSION_MINOR	4
+#define FIRMWARE_VERSION_MINOR	5
 
 #define PRODUCT_NAME            "Witty Pi 5"
 

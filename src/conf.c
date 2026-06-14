@@ -17,6 +17,8 @@
 #define SUPPRESS_CONF_FILE_SAVING_US    5000000
 
 
+static bool force_conf_save = false;
+
 conf_obj_t config;
 conf_obj_t original_config;
 
@@ -267,6 +269,8 @@ bool conf_parse(const char *str, conf_obj_t *obj) {
     if (!str || !obj) {
         return false;
     }
+    
+    memset(obj, 0, sizeof(*obj));
 
     const char *p = str;
     obj->count = 0;
@@ -454,7 +458,7 @@ bool conf_set_to(conf_obj_t *obj, const char *key, uint8_t value) {
             if (0 == strcmp(obj->items[i].key, key)) {
     			uint8_t old_val = obj->items[i].value;
                 obj->items[i].value = value;
-    			if (obj->items[i].callback) {
+    			if (obj == &config && obj->items[i].callback) {
     				obj->items[i].callback(key, old_val, value);
     			}
     			if (obj == &config) {
@@ -484,9 +488,11 @@ bool conf_set(const char *key, uint8_t value) {
 // Save configuration to file without any condition
 // This will discard any change made directly on the file in USB-Drive
 bool conf_save(void) {
-    if (dirty) {
+    if (dirty || force_conf_save) {
     	if (save_to_file(CONF_FILE_PATH, &config)) {
             dirty = false;
+            copy_config(&original_config, &config);
+            force_conf_save = false;
             return true;
         }
     }
@@ -500,8 +506,8 @@ bool conf_save(void) {
 void conf_reset(void) {
     debug_log("Reset configuration.\n");
     copy_config(&config, &default_config);
-    copy_config(&original_config, &config);
-    dirty = false;
+    dirty = true;
+    force_conf_save = true;
 }
 
 
@@ -509,6 +515,15 @@ void conf_reset(void) {
  * Synchronize the configuration in RAM with the data in file
  */
 void conf_sync(void) {
+    if (force_conf_save) {
+        if (conf_save()) {
+            debug_log("Force saved conf file.\n");
+            if (f_stat(CONF_FILE_PATH, &disk_file_info) == FR_OK) {
+                debug_log("conf file info updated.\n");
+            }
+        }
+        return;
+    }
     FILINFO new_info;
     FRESULT res = f_stat(CONF_FILE_PATH, &new_info);
     if (res == FR_OK && (new_info.fdate != disk_file_info.fdate || new_info.ftime != disk_file_info.ftime)) {

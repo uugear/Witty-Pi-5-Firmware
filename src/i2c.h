@@ -14,7 +14,7 @@
  */
 #define I2C_FW_ID                   0   // [0x00] Firmware id
 #define I2C_FW_VERSION_MAJOR		1   // [0x01] Firmware major version
-#define I2C_FW_VERSION_MINOR		2	// [0x02] Firmware minor version (x100)
+#define I2C_FW_VERSION_MINOR		2	// [0x02] Firmware minor version
  
 #define I2C_VUSB_MV_MSB				3	// [0x03] Most significant byte of Vusb (unit: mV)
 #define I2C_VUSB_MV_LSB				4	// [0x04] Least significant byte of Vusb (unit: mV)

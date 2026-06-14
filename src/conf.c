@@ -500,8 +500,7 @@ bool conf_save(void) {
 void conf_reset(void) {
     debug_log("Reset configuration.\n");
     copy_config(&config, &default_config);
-    copy_config(&original_config, &config);
-    dirty = false;
+    dirty = true;
 }
 
 

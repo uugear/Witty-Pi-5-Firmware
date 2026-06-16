@@ -23,4 +23,9 @@ void usb_msc_ensure_ejected(void);
  */
 void usb_msc_mark_ejected_and_wait(uint32_t wait_ms);
 
+/**
+ * Process USB MSC task
+ */
+void usb_msc_process_task(void);
+
 #endif

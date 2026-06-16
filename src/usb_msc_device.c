@@ -19,6 +19,7 @@ static bool ejected = false;
 
 static bool mounted = false;
 
+static bool script_reload_pending = false;
 
 /**
  * Check whether emulated USB mass storage device is mounted
@@ -73,6 +74,23 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t* block_count, uint16_t* block_siz
 }
 
 
+static void usb_msc_set_ejected(bool new_ejected, bool reload_script) {
+    if (ejected == new_ejected) {
+        return;
+    }
+    bool was_ejected = ejected;
+    ejected = new_ejected;
+    if (ejected) {
+        debug_log("Eject USB MSC device.\n");
+        if (reload_script) {
+            script_reload_pending = true;
+        }
+    } else {
+        debug_log("Load USB MSC device.\n");
+    }
+}
+
+
 /**
  * Invoked when received Start Stop Unit command
  * - Start = 0 : stopped power mode, if load_eject = 1 : unload disk storage
@@ -82,14 +100,7 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
     (void) lun;
     (void) power_condition;
     if (load_eject) {
-        bool was_ejected = ejected;
-        ejected = !start;
-        if (ejected != was_ejected) {
-            debug_log("Eject USB MSC device.\n");
-
-            // Generate script files if necessary
-            load_script(false);
-        }
+        usb_msc_set_ejected(!start, true);
     }
     return true;
 }
@@ -101,6 +112,10 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
  */
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     (void) lun;
+    if (ejected) {
+        tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3a, 0x00);
+        return -1;
+    }
     if (lba >= FAT_BLOCK_NUM) {
         debug_log("read10 out of ramdisk: lba=%u\n", lba);
         return -1;
@@ -136,6 +151,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* 
     (void) lun;
 
     if (ejected) {
+        tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3a, 0x00);
         return -1;
     }
 
@@ -207,14 +223,13 @@ void tud_umount_cb(void) {
     mounted = false;
 }
 
-
 /**
  * Ensure USB MSC is ejected before file operations.
  * Safe to call even if already ejected.
  */
 void usb_msc_ensure_ejected(void) {
     if (!ejected) {
-        tud_msc_start_stop_cb(0, 0, false, true);
+        usb_msc_set_ejected(true, false);
     }
 }
 
@@ -230,5 +245,16 @@ void usb_msc_mark_ejected_and_wait(uint32_t wait_ms) {
     while (!time_reached(until)) {
         tud_task();
         sleep_ms(1);
+    }
+}
+
+
+/**
+ * Process USB MSC task
+ */
+void usb_msc_process_task(void) {
+    if (script_reload_pending) {
+        script_reload_pending = false;
+        load_script(false);
     }
 }

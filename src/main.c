@@ -26,6 +26,7 @@
 #include "util.h"
 #include "bootsel_button.h"
 #include "hibernate.h"
+#include "usb_msc_device.h"
 
 
 #define VOLTAGE_CHECK_INTERVAL_US	1000000
@@ -373,6 +374,7 @@ int main() {
     // Main loop
     while (true) {
         tud_task();
+        usb_msc_process_task();
         i2c_process_pending_admin_command();  // Process deferred admin commands (FS ops outside I2C IRQ)
         rtc_process_pending_alarm_conf();  // Process deferred alarm configurations
         process_log_task();

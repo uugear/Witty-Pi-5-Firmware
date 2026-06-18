@@ -312,7 +312,8 @@ int main() {
 	led_init();	// Initialize LED controller
 
 	hibernate_init();   // Initialize hibernation manager
-	if (hibernate_was_resumed()) {
+	bool resumed_from_hibernate = hibernate_was_resumed();
+	if (resumed_from_hibernate) {
 
     	uint32_t wake_flags = hibernate_get_wakeup_flags();
 
@@ -353,9 +354,9 @@ int main() {
     bool auto_start = false;
 	const char * reason = NULL;
 
-    // Turn on Raspberry Pi if "Default ON" is configured
+    // If device is newly powered and "Default ON" is configured, turn Raspberry Pi on
 	uint8_t default_on = conf_get(CONF_DEFAULT_ON_DELAY);
-	if (default_on != 255) {
+	if (!resumed_from_hibernate && default_on != 255 && current_rpi_state == STATE_OFF) {
 		sleep_ms((uint16_t)default_on * 1000);
 		debug_log("Raspberry Pi is turned on because \"Default ON\" is set.\n");
         request_startup(ACTION_REASON_POWER_CONNECTED);

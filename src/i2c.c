@@ -6,6 +6,7 @@
 #include <hardware/sync.h>
 #include <pico/i2c_slave.h>
 #include <tusb.h>
+#include <string.h>
 
 #include "i2c.h"
 #include "adc.h"
@@ -127,6 +128,7 @@ const char *dir_names[DIRECTORY_COUNT + 1] = {
     "/schedule"     // 4: DIRECTORY_SCHEDULE
 };
 uint64_t heartbeat_update_time = 0;
+
 
 /**
  * Calculates the CRC-8 checksum for a data buffer
@@ -391,49 +393,53 @@ bool i2c_unpack_filename(char *input, char *output) {
 }
 
 
-// Callback for applying schedule script
-int64_t apply_schedule_script_callback(alarm_id_t id, void *user_data) {
-	if (load_script(true)) {
-        debug_log("Load and run script OK\n");
-    } else {
-        debug_log("Load and run script failed\n");
-    }
-    return 0;
-}
-
-
 // Apply the schedule script
 bool apply_schedule_script(int dir, char* filename) {
-    if (dir > 0 && dir <= DIRECTORY_COUNT) {
-        char buf[256];
-        sprintf(buf, "%s/%s", dir_names[dir], filename);
-        if (file_exists(buf)) {
-            purge_script();
-            const char *ext = strrchr(filename, '.');
-            char * dest = NULL;
-            if (ext) {
-                if (strcasecmp(ext, ".wpi") == 0) {
-                    dest = WPI_SCRIPT_PATH;
-                } else if (strcasecmp(ext, ".act") == 0) {
-                    dest = ACT_SCRIPT_PATH;
-                } else if (strcasecmp(ext, ".skd") == 0) {
-                    dest = SKD_SCRIPT_PATH;
-                }
-            }
-            if (dest && file_copy(dest, buf)) {
-                set_script_in_use(true);
-                add_alarm_in_us(500000, apply_schedule_script_callback, NULL, true);
-                return true;
-            } else {
-                debug_log("Failed to copy script: %s\n", buf);
-            }
-        } else {
-            debug_log("Script file does not exist: %s\n", buf);
+    if (dir <= 0 || dir > DIRECTORY_COUNT) {
+        return false;
+    }
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s/%s", dir_names[dir], filename);
+
+    if (!file_exists(buf)) {
+        debug_log("Script file does not exist: %s\n", buf);
+        return false;
+    }
+
+    const char *ext = strrchr(filename, '.');
+    char *dest = NULL;
+
+    if (ext) {
+        if (strcasecmp(ext, ".wpi") == 0) {
+            dest = WPI_SCRIPT_PATH;
+        } else if (strcasecmp(ext, ".act") == 0) {
+            dest = ACT_SCRIPT_PATH;
+        } else if (strcasecmp(ext, ".skd") == 0) {
+            dest = SKD_SCRIPT_PATH;
         }
     }
-    return false;
-}
 
+    if (dest == NULL) {
+        debug_log("Unsupported script file type: %s\n", filename);
+        return false;
+    }
+    
+    purge_script();
+
+    if (!file_copy(dest, buf)) {
+        debug_log("Failed to copy script: %s\n", buf);
+        return false;
+    }
+
+    if (!load_script(true)) {
+        debug_log("Failed to load and run script: %s\n", dest);
+        return false;
+    }
+
+    debug_log("Load and run script OK\n");
+    return true;
+}
 
 
 /**
@@ -955,25 +961,9 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 
         if (i2c_index == -1) {
             // Master writes register index
-            int old_i2c_index = i2c_index;
 			i2c_index = i2c_read_byte_raw(i2c);
+            i2c_cached_index = i2c_index;
 
-			if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_CONTROL_REGISTER) {        // Index for accessing RTC
-				uint8_t index = i2c_index - I2C_VREG_RX8025_SEC;
-				i2c_write_burst_blocking(i2c0, RX8025_ADDRESS, &index, 1);
-			} else if (i2c_index >= I2C_VREG_TMP112_TEMP_MSB && i2c_index <= I2C_VREG_TMP112_THIGH_LSB) {   // Index for accessing temperature sensor
-				uint8_t index = (i2c_index - I2C_VREG_TMP112_TEMP_MSB) / 2;
-				switch (i2c_index) {
-					case I2C_VREG_TMP112_TEMP_MSB:
-					case I2C_VREG_TMP112_CONF_MSB:
-					case I2C_VREG_TMP112_TLOW_MSB:
-					case I2C_VREG_TMP112_THIGH_MSB:
-						i2c_write_burst_blocking(i2c0, TMP112_ADDRESS, &index, 1);
-						break;
-					default:
-						break;
-				}
-			}
         } else {
             // Master writes register value
             uint8_t data = i2c_read_byte_raw(i2c);
@@ -1040,33 +1030,15 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
                         }
                         break;
 				}
-			} else {    // Write [Virtual registers]
-				if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_CONTROL_REGISTER) {	// RX8025
-					i2c_write_blocking(i2c0, RX8025_ADDRESS, &data, 1, false);
-					if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_YEAR) {
-						rtc_sync_powman_timer(); // Synchronize if time changed
-					}
-				} else if(i2c_index >= I2C_VREG_TMP112_TEMP_MSB && i2c_index <= I2C_VREG_TMP112_THIGH_LSB) { // TMP112
-					switch (i2c_index) {
-						case I2C_VREG_TMP112_TEMP_MSB:
-						case I2C_VREG_TMP112_TEMP_LSB:
-							debug_log("Attempt to write temperature register denied.\n");
-							break;
-						case I2C_VREG_TMP112_CONF_MSB:
-						case I2C_VREG_TMP112_TLOW_MSB:
-						case I2C_VREG_TMP112_THIGH_MSB:
-							i2c_write_burst_blocking(i2c0, TMP112_ADDRESS, &data, 1);
-							break;
-						case I2C_VREG_TMP112_CONF_LSB:
-						case I2C_VREG_TMP112_TLOW_LSB:
-						case I2C_VREG_TMP112_THIGH_LSB:
-							i2c_write_blocking(i2c0, TMP112_ADDRESS, &data, 1, false);
-							break;
-						default:
-							break;
-					}
-				}
-			}
+            } else if (i2c_index >= I2C_VREG_FIRST && i2c_index <= I2C_VREG_LAST) { // Write [Virtual register]
+                int8_t ret = set_virtual_register((uint8_t)i2c_index, data);
+
+                if (ret > 0 &&
+                    i2c_index >= I2C_VREG_RX8025_SEC &&
+                    i2c_index <= I2C_VREG_RX8025_YEAR) {
+                    rtc_sync_powman_timer(); // Synchronize if RTC time changed
+                }
+            }
 			i2c_cached_index = i2c_index;
 			i2c_index = -1;
         }
@@ -1103,47 +1075,9 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 					clear_system_up_timer();
 			    }
 		    }
-		} else if (i2c_index >= I2C_VREG_RX8025_SEC && i2c_index <= I2C_VREG_RX8025_CONTROL_REGISTER) {	// RX8025
-			i2c_read_blocking(i2c0, RX8025_ADDRESS, &data, 1, false);
-		} else if(i2c_index >= I2C_VREG_TMP112_TEMP_MSB && i2c_index <= I2C_VREG_TMP112_THIGH_LSB) {	// TMP112
-			uint8_t buffer[2];
-			switch (i2c_index) {
-				case I2C_VREG_TMP112_TEMP_MSB:
-					i2c_read_blocking(i2c0, TMP112_ADDRESS, buffer, 2, false);
-					data = temp_msb = buffer[0];
-					temp_lsb = buffer[1];
-					break;
-				case I2C_VREG_TMP112_TEMP_LSB:
-					data = temp_lsb;
-					break;
-				case I2C_VREG_TMP112_CONF_MSB:
-					i2c_read_blocking(i2c0, TMP112_ADDRESS, buffer, 2, false);
-					data = conf_msb = buffer[0];
-					conf_lsb = buffer[1];
-					break;
-				case I2C_VREG_TMP112_CONF_LSB:
-					data = conf_lsb;
-					break;
-				case I2C_VREG_TMP112_TLOW_MSB:
-					i2c_read_blocking(i2c0, TMP112_ADDRESS, buffer, 2, false);
-					data = tlow_msb = buffer[0];
-					tlow_lsb = buffer[1];
-					break;
-				case I2C_VREG_TMP112_TLOW_LSB:
-					data = tlow_lsb;
-					break;
-				case I2C_VREG_TMP112_THIGH_MSB:
-					i2c_read_blocking(i2c0, TMP112_ADDRESS, buffer, 2, false);
-					data = thigh_msb = buffer[0];
-					thigh_lsb = buffer[1];
-					break;
-				case I2C_VREG_TMP112_THIGH_LSB:
-					data = thigh_lsb;
-					break;
-				default:
-					break;
-			}
-		}
+		} else if (i2c_index >= I2C_VREG_FIRST && i2c_index <= I2C_VREG_LAST) { // Read [Virtual register]
+            data = get_virtual_register((uint8_t)i2c_index);
+        }
 		i2c_write_byte_raw(i2c, data);
 		i2c_cached_index = i2c_index;
         i2c_index = -1;
@@ -1203,11 +1137,20 @@ void i2c_devices_init(void) {
  * @return Number of bytes read, or PICO_ERROR_GENERIC for error
  */
 int i2c_read_from_slave(uint8_t addr, uint8_t reg, uint8_t *dst, uint32_t len) {
-    int ret = i2c_write_burst_blocking(i2c0, addr, &reg, 1);
-    if (ret < 0) {
-        return ret;
+    if (dst == NULL || len == 0) {
+        return PICO_ERROR_GENERIC;
     }
-    return i2c_read_blocking(i2c0, addr, dst, len, false);
+
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    int ret = i2c_write_blocking(i2c0, addr, &reg, 1, true);  // no STOP, repeated-start follows
+    if (ret >= 0) {
+        ret = i2c_read_blocking(i2c0, addr, dst, len, false);
+    }
+
+    restore_interrupts(irq_state);
+
+    return ret;
 }
 
 
@@ -1216,16 +1159,27 @@ int i2c_read_from_slave(uint8_t addr, uint8_t reg, uint8_t *dst, uint32_t len) {
  *
  * @param addr Address of the slave device
  * @param reg Index of the register
- * @param dst Pointer to buffer with data
+ * @param src Pointer to buffer with data
  * @param len Length of data
  * @return Number of bytes written, or PICO_ERROR_GENERIC for error
  */
-int i2c_write_to_slave(uint8_t addr, uint8_t reg, uint8_t *dst, uint32_t len) {
-    int ret = i2c_write_burst_blocking(i2c0, addr, &reg, 1);
-    if (ret < 0) {
-        return ret;
+int i2c_write_to_slave(uint8_t addr, uint8_t reg, const uint8_t *src, uint32_t len) {
+    if (src == NULL || len == 0 || len > 31) {
+        return PICO_ERROR_GENERIC;
     }
-    return i2c_write_blocking(i2c0, addr, dst, len, false);
+
+    uint8_t buf[32];
+    buf[0] = reg;
+    memcpy(&buf[1], src, len);
+
+    uint32_t irq_state = save_and_disable_interrupts();
+    int ret = i2c_write_blocking(i2c0, addr, buf, len + 1, false);
+    restore_interrupts(irq_state);
+
+    if (ret == (int)(len + 1)) {
+        return len;
+    }
+    return ret;
 }
 
 
@@ -1277,6 +1231,30 @@ uint8_t get_virtual_register(uint8_t index) {
 }
 
 
+static void cache_tmp112_register(uint8_t reg, uint8_t msb, uint8_t lsb) {
+    switch (reg) {
+        case TMP112_REG_TEMP:
+            temp_msb = msb;
+            temp_lsb = lsb;
+            break;
+        case TMP112_REG_CONF:
+            conf_msb = msb;
+            conf_lsb = lsb;
+            break;
+        case TMP112_REG_TLOW:
+            tlow_msb = msb;
+            tlow_lsb = lsb;
+            break;
+        case TMP112_REG_THIGH:
+            thigh_msb = msb;
+            thigh_lsb = lsb;
+            break;
+        default:
+            break;
+    }
+}
+
+
 /**
  * Set value to virtual register
  *
@@ -1290,44 +1268,35 @@ int8_t set_virtual_register(uint8_t index, uint8_t value) {
 
         return i2c_write_to_slave(RX8025_ADDRESS, index - I2C_VREG_RX8025_SEC, &value, 1);
 
-	} else if(index >= I2C_VREG_TMP112_TEMP_MSB && index <= I2C_VREG_TMP112_THIGH_LSB) { // TMP112
-		uint8_t data[2] = {0};
-		switch (index) {
-			case I2C_VREG_TMP112_TEMP_MSB:
-				temp_msb = value;
-				break;
-			case I2C_VREG_TMP112_TEMP_LSB:
-				temp_lsb = value;
-				data[0] = temp_msb;
-				data[1] = temp_lsb;
-				return i2c_write_to_slave(TMP112_ADDRESS, TMP112_REG_TEMP, data, 2);
-			case I2C_VREG_TMP112_CONF_MSB:
-				conf_msb = value;
-				break;
-			case I2C_VREG_TMP112_CONF_LSB:
-				conf_lsb = value;
-				data[0] = conf_msb;
-				data[1] = conf_lsb;
-				return i2c_write_to_slave(TMP112_ADDRESS, TMP112_REG_CONF, data, 2);
-			case I2C_VREG_TMP112_TLOW_MSB:
-				tlow_msb = value;
-				break;
-			case I2C_VREG_TMP112_TLOW_LSB:
-				tlow_lsb = value;
-				data[0] = tlow_msb;
-				data[1] = tlow_lsb;
-				return i2c_write_to_slave(TMP112_ADDRESS, TMP112_REG_TLOW, data, 2);
-			case I2C_VREG_TMP112_THIGH_MSB:
-				thigh_msb = value;
-				break;
-			case I2C_VREG_TMP112_THIGH_LSB:
-				thigh_lsb = value;
-				data[0] = thigh_msb;
-				data[1] = thigh_lsb;
-				return i2c_write_to_slave(TMP112_ADDRESS, TMP112_REG_THIGH, data, 2);
-		}
-	}
-	return 0;
+    } else if (index >= I2C_VREG_TMP112_TEMP_MSB && index <= I2C_VREG_TMP112_THIGH_LSB) { // TMP112
+
+        uint8_t offset = index - I2C_VREG_TMP112_TEMP_MSB;
+        uint8_t reg = offset / 2;
+        bool is_lsb = (offset & 1) != 0;
+
+        // Temperature register is read-only.
+        if (reg == TMP112_REG_TEMP) {
+            return 0;
+        }
+
+        uint8_t data[2] = {0};
+
+        int ret = i2c_read_from_slave(TMP112_ADDRESS, reg, data, 2);
+        if (ret < 0) {
+            return ret;
+        }
+
+        data[is_lsb ? 1 : 0] = value;
+
+        ret = i2c_write_to_slave(TMP112_ADDRESS, reg, data, 2);
+        if (ret >= 0) {
+            cache_tmp112_register(reg, data[0], data[1]);
+        }
+
+        return ret;
+    }
+
+    return 0;
 }
 
 

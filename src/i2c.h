@@ -235,11 +235,11 @@ int i2c_read_from_slave(uint8_t addr, uint8_t reg, uint8_t *dst, uint32_t len);
  * 
  * @param addr Address of the slave device
  * @param reg Index of the register
- * @param dst Pointer to buffer with data
+ * @param src Pointer to buffer with data
  * @param len Length of data
  * @return Number of bytes written, or PICO_ERROR_GENERIC for error
  */
-int i2c_write_to_slave(uint8_t addr, uint8_t reg, uint8_t *dst, uint32_t len);
+int i2c_write_to_slave(uint8_t addr, uint8_t reg, const uint8_t *src, uint32_t len);
 
 
 /**
@@ -285,7 +285,6 @@ uint8_t get_virtual_register(uint8_t index);
  * @return 1 if success, 0 or PICO_ERROR_GENERIC otherwise
  */
 int8_t set_virtual_register(uint8_t index, uint8_t value);
-
 
 
 /**

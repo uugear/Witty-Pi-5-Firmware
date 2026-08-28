@@ -9,12 +9,15 @@
 #include "conf.h"
 #include "log.h"
 #include "main.h"
+#include "i2c.h"
 
 
 #define CONF_FILE_PATH          "/conf/WittyPi5.conf"
 #define CONF_FILE_MAX_SIZE      CONF_MAX_KEY_LENGTH * CONF_MAX_ITEMS + CONF_MAX_ITEMS + 32
 
 #define SUPPRESS_CONF_FILE_SAVING_US    5000000
+
+#define CONF_SAVE_I2C_QUIET_MS          10
 
 
 static bool force_conf_save = false;
@@ -359,23 +362,31 @@ bool save_to_file(const char *path, const conf_obj_t *obj) {
     if (length <= 0) {
         return false;
     }
+    bool success = false;
     FIL fp;
     FRESULT res = f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS);
     if (res == FR_OK) {
-        UINT bw;
+        UINT bw = 0;
         res = f_write(&fp, data, length, &bw);
         if (res == FR_OK && bw == (UINT)length) {
-            f_sync(&fp);
-            f_close(&fp);
-            return true;
+            res = f_sync(&fp);
+            if (res == FR_OK) {
+                success = true;
+            } else {
+                debug_log("Sync file %s failed: %d\n", path, res);
+            }
         } else {
             debug_log("Write file %s failed: %d\n", path, res);
         }
-        f_close(&fp);
+        FRESULT close_res = f_close(&fp);
+        if (close_res != FR_OK) {
+            debug_log("Close file %s failed: %d\n", path, close_res);
+            success = false;
+        }
     } else {
         debug_log("Can't open file %s for writing: %d\n", path, res);
     }
-    return false;
+    return success;
 }
 
 
@@ -461,7 +472,7 @@ bool conf_set_to(conf_obj_t *obj, const char *key, uint8_t value) {
     			if (obj == &config && obj->items[i].callback) {
     				obj->items[i].callback(key, old_val, value);
     			}
-    			if (obj == &config) {
+    			if (obj == &config && old_val != value) {
                     dirty = true;
                 }
                 return true;
@@ -489,12 +500,17 @@ bool conf_set(const char *key, uint8_t value) {
 // This will discard any change made directly on the file in USB-Drive
 bool conf_save(void) {
     if (dirty || force_conf_save) {
-    	if (save_to_file(CONF_FILE_PATH, &config)) {
+        bool i2c_pause_acquired = i2c_external_slave_pause();
+        bool success = save_to_file(CONF_FILE_PATH, &config);
+    	if (success) {
             dirty = false;
             copy_config(&original_config, &config);
             force_conf_save = false;
-            return true;
         }
+        if (i2c_pause_acquired) {
+            i2c_external_slave_resume();
+        }
+        return success;
     }
     return false;
 }
@@ -565,7 +581,9 @@ void conf_sync(void) {
 void process_conf_task(void) {
     if (dirty) {
         if (get_absolute_time() >= SUPPRESS_CONF_FILE_SAVING_US && !is_usb_msc_device_mounted()) {
-            conf_sync();
+            if (i2c_external_slave_is_quiet(CONF_SAVE_I2C_QUIET_MS)) {
+                conf_sync();
+            }
         }
     }
 }

@@ -4,10 +4,10 @@
 #include <hardware/i2c.h>
 #include <hardware/powman.h>
 #include <hardware/sync.h>
-#include <pico/i2c_slave.h>
 #include <tusb.h>
 #include <string.h>
 
+#include "wp5_i2c_slave.h"
 #include "i2c.h"
 #include "adc.h"
 #include "log.h"
@@ -46,6 +46,9 @@
 #define ADMIN_RPI_REBOOTING     3
 
 #define CRC8_POLYNOMIAL			0x31	// CRC-8 Polynomial (x^8 + x^5 + x^4 + 1 -> 00110001 -> 0x31)
+
+#define I2C_RESUME_IDLE_US          200
+#define I2C_RESUME_IDLE_TIMEOUT_US  20000
 
 /*
  * I2C transfer buffers
@@ -127,7 +130,41 @@ const char *dir_names[DIRECTORY_COUNT + 1] = {
     "/log",         // 3: DIRECTORY_LOG
     "/schedule"     // 4: DIRECTORY_SCHEDULE
 };
+
 uint64_t heartbeat_update_time = 0;
+
+static volatile uint64_t last_external_i2c_active_time = 0;
+
+static bool external_i2c_slave_active = false;
+
+static uint32_t external_i2c_pause_depth = 0;
+
+
+/**
+ * Helper function that waits until external I2C bus idle or timeout
+ */
+static bool wait_for_external_i2c_bus_idle(uint32_t idle_us, uint32_t timeout_us) {
+    uint64_t start_us = time_us_64();
+    uint64_t idle_start_us = 0;
+    bool idle_tracking = false;
+    while (time_us_64() - start_us < timeout_us) {
+        uint64_t now_us = time_us_64();
+        bool sda_high = gpio_get(I2C_SLAVE_SDA_PIN);
+        bool scl_high = gpio_get(I2C_SLAVE_SCL_PIN);
+        if (sda_high && scl_high) {
+            if (!idle_tracking) {
+                idle_tracking = true;
+                idle_start_us = now_us;
+            } else if (now_us - idle_start_us >= idle_us) {
+                return true;
+            }
+        } else {
+            idle_tracking = false;
+        }
+        tight_loop_contents();
+    }
+    return false;
+}
 
 
 /**
@@ -156,7 +193,6 @@ uint8_t calculate_crc8(const uint8_t *data, size_t len) {
     }
     return crc;
 }
-
 
 
 // Prepare the file list for directory and put it into the download buffer
@@ -958,7 +994,7 @@ uint8_t get_read_only_register(uint8_t index) {
 static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
     switch (event) {
     case I2C_SLAVE_RECEIVE: // Master has written some data to this slave device
-
+        last_external_i2c_active_time = powman_timer_get_ms();
         if (i2c_index == -1) {
             // Master writes register index
 			i2c_index = i2c_read_byte_raw(i2c);
@@ -1044,7 +1080,7 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
         }
         break;
     case I2C_SLAVE_REQUEST: // Master is requesting data from this slave device
-
+        last_external_i2c_active_time = powman_timer_get_ms();
         sleep_us(7);
         uint8_t data = 0x00;
         
@@ -1083,6 +1119,7 @@ static void i2c_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
         i2c_index = -1;
         break;
     case I2C_SLAVE_FINISH: // Master has signalled Stop / Restart
+        last_external_i2c_active_time = powman_timer_get_ms();
         break;
     default:
         break;
@@ -1123,7 +1160,9 @@ void i2c_devices_init(void) {
     gpio_pull_up(I2C_SLAVE_SCL_PIN);
 
     i2c_init(i2c1, I2C_SLAVE_BAUDRATE);
-    i2c_slave_init(i2c1, I2C_SLAVE_ADDRESS, &i2c_slave_handler);
+    wp5_i2c_slave_init(i2c1, I2C_SLAVE_ADDRESS, &i2c_slave_handler);
+
+    external_i2c_slave_active = true;
 }
 
 
@@ -1308,4 +1347,131 @@ int8_t set_virtual_register(uint8_t index, uint8_t value) {
  */
 void request_rpi_shutdown(bool shutdown) {
 	i2c_admin_reg[I2C_ADMIN_SHUTDOWN - I2C_ADMIN_FIRST] = shutdown ? ADMIN_TURN_RPI_OFF : 0;
+}
+
+
+/**
+ * Pause external I2C slave
+ *
+ * @return true if pause actually acquired
+ */
+bool i2c_external_slave_pause(void) {
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    if (!external_i2c_slave_active &&
+        external_i2c_pause_depth == 0) {
+        restore_interrupts(irq_state);
+        return false;
+    }
+
+    if (external_i2c_pause_depth == 0) {
+        /*
+         * Tear down the slave software/IRQ state first.
+         */
+        wp5_i2c_slave_deinit(i2c1);
+
+        /*
+         * Hold the entire I2C1 peripheral in hardware reset for the
+         * whole outer pause. This discards all controller/FIFO/
+         * interrupt/protocol state.
+         */
+        i2c_deinit(i2c1);
+
+        external_i2c_slave_active = false;
+
+        i2c_index = -1;
+        i2c_cached_index = 0;
+    }
+
+    external_i2c_pause_depth++;
+
+    restore_interrupts(irq_state);
+    return true;
+}
+
+
+/**
+ * Resume external I2C slave
+ */
+void i2c_external_slave_resume(void) {
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    if (external_i2c_pause_depth == 0) {
+        restore_interrupts(irq_state);
+        return;
+    }
+
+    /*
+     * Nested resume: the physical I2C1 peripheral must remain in reset.
+     */
+    if (external_i2c_pause_depth > 1) {
+        external_i2c_pause_depth--;
+        restore_interrupts(irq_state);
+        return;
+    }
+
+    /*
+     * depth == 1: final outer resume.
+     *
+     * Keep I2C1 in hardware reset while waiting for a clean idle window
+     * on the external bus. Do not keep global interrupts disabled while
+     * waiting.
+     */
+    restore_interrupts(irq_state);
+
+    wait_for_external_i2c_bus_idle(
+        I2C_RESUME_IDLE_US,
+        I2C_RESUME_IDLE_TIMEOUT_US
+    );
+
+    irq_state = save_and_disable_interrupts();
+
+    /*
+     * The outer pause should still be owned here.
+     */
+    if (external_i2c_pause_depth != 1) {
+        restore_interrupts(irq_state);
+        return;
+    }
+
+    /*
+     * Fully recreate the I2C1 hardware from reset state.
+     *
+     * i2c_init() resets/unresets the block and restores all base
+     * controller configuration. It leaves slave mode disabled.
+     */
+    i2c_init(i2c1, I2C_SLAVE_BAUDRATE);
+
+    i2c_index = -1;
+    i2c_cached_index = 0;
+
+    /*
+     * Rebuild the slave handler/IRQ state and enable slave mode.
+     */
+    wp5_i2c_slave_init(
+        i2c1,
+        I2C_SLAVE_ADDRESS,
+        &i2c_slave_handler
+    );
+
+    external_i2c_slave_active = true;
+    external_i2c_pause_depth = 0;
+
+    restore_interrupts(irq_state);
+}
+
+
+/**
+ * Check whether the external I2C slave has been inactive
+ * for at least the specified period.
+ */
+bool i2c_external_slave_is_quiet(uint32_t quiet_ms) {
+    uint32_t irq_state = save_and_disable_interrupts();
+    uint64_t last = last_external_i2c_active_time;
+    uint64_t now = powman_timer_get_ms();
+    restore_interrupts(irq_state);
+    if (last == 0) {
+        return true;
+    }
+    return now - last >= quiet_ms;
 }

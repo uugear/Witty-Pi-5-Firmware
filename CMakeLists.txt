@@ -19,8 +19,12 @@ if (GCC_MAJOR_MINOR_VERSION VERSION_LESS "14.2")
     message(FATAL_ERROR "GCC version ${GCC_MAJOR_MINOR_VERSION} is too old. Please use GCC 14.2 or newer.")
 endif()
 
-if (PICO_SDK_VERSION_STRING VERSION_LESS "2.2.0")
-    message(FATAL_ERROR "Raspberry Pi Pico SDK version 2.2.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
+if (NOT PICO_SDK_VERSION_STRING VERSION_EQUAL "2.2.0")
+    message(FATAL_ERROR
+        "This firmware contains a local pico_i2c_slave compatibility layer "
+        "based on Pico SDK 2.2.0. Review it before building with SDK "
+        "${PICO_SDK_VERSION_STRING}."
+    )
 endif()
 
 add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
@@ -32,9 +36,15 @@ add_executable(${PROJECT_NAME} ${SOURCES}
     ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source/ff.c
 )
 
+target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave/wp5_i2c_slave.c
+)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source
+    ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave
+    ${PICO_SDK_PATH}/src/rp2_common/pico_i2c_slave/include
 )
 
 # pull in dependencies
@@ -43,9 +53,9 @@ target_link_libraries(${PROJECT_NAME}
     tinyusb_board
     tinyusb_device
     hardware_powman
-    pico_i2c_slave
     hardware_i2c
     hardware_adc
+    hardware_irq
 )
 
 # enable usb output and uart output

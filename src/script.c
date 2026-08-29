@@ -95,6 +95,35 @@ bool parse_time_component(const char* str, int* hours, int* minutes, int* second
 }
 
 
+static void log_action_time(const char *prefix, bool is_up, uint64_t time) {
+    DateTime dt;
+    timestamp_to_datetime((int64_t)time, &dt);
+    debug_log("%s: %s at %04d-%02d-%02d %02d:%02d:%02d\n",
+              prefix,
+              is_up ? "Startup" : "Shutdown",
+              dt.year, dt.month, dt.day,
+              dt.hour, dt.min, dt.sec);
+}
+
+
+static bool append_action(Action *actions, int *num_actions, bool is_up, uint64_t time) {
+    if (*num_actions >= WPI_MAX_ACTIONS) {
+        debug_log("Warning: WPI script generated too many actions; schedule was truncated at %d actions.\n", WPI_MAX_ACTIONS);
+        if (*num_actions > 0) {
+            Action *last = &actions[*num_actions - 1];
+            log_action_time("Last accepted action", last->is_up, last->time);
+        }
+        log_action_time("Rejected action", is_up, time);
+        return false;
+    }
+    actions[(*num_actions)++] = (Action){
+        .is_up = is_up,
+        .time = time
+    };
+    return true;
+}
+
+
 /**
  * Parse WPI script text into an Action array
  * BEGIN time will be shifted if one or more cycles are in the past
@@ -246,7 +275,9 @@ bool parse_wpi_script(const char* script_text, Action* actions, int* num_actions
     bool is_on = false;
     
     // Append the first UP action for the (shifted) BEGIN moment
-    actions[(*num_actions)++] = (Action){.is_up = true, .time = current_time};
+    if (!append_action(actions, num_actions, true, current_time)) {
+        return true;
+    }
     is_on = true;
     
     // Generate actions based on state changes, until the END moment
@@ -258,24 +289,27 @@ bool parse_wpi_script(const char* script_text, Action* actions, int* num_actions
                 // If device is currently on, add one last DOWN action
                 if (is_on) {
                     // Use end_time instead of potentially going beyond it
-                    actions[(*num_actions)++] = (Action){.is_up = false, .time = end_time};
+                    if (!append_action(actions, num_actions, false, end_time)) {
+                        return true;
+                    }
                 }
                 break;
             }
             
             if (states[i].type == WPI_SCRIPT_STATE_ON) {
                 // ON state ends, add DOWN action
-                actions[(*num_actions)++] = (Action){.is_up = false, .time = current_time};
+                if (!append_action(actions, num_actions, false, current_time)) {
+                    return true;
+                }
                 is_on = false;
             } else {
                 // OFF state ends, add UP action
-                actions[(*num_actions)++] = (Action){.is_up = true, .time = current_time};
+                if (!append_action(actions, num_actions, true, current_time)) {
+                    return true;
+                }
                 is_on = true;
             }
         }
-    }
-    if (*num_actions >= WPI_MAX_ACTIONS - 1) {
-        debug_log("Warning: action list is truncated.\n");
     }
     return true;
 }

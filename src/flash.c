@@ -1,7 +1,7 @@
 #include "flash.h"
 #include "log.h"
 #include "led.h"
-
+#include "i2c.h"
 
 uint8_t boot_sector[FAT_BLOCK_SIZE] = {
     //---------------- Sector 0: Boot Sector ----------------//
@@ -119,6 +119,9 @@ int flash_write_4k_sector(int offset, uint8_t *b0, uint8_t *b1, uint8_t *b2, uin
  * Initialize FatFS for flash
  */
 void flash_fatfs_init(void) {
+    
+    bool i2c_pause_acquired = i2c_external_slave_pause();
+    
     uint32_t ints = save_and_disable_interrupts();
 
     int offset = 0;
@@ -140,6 +143,10 @@ void flash_fatfs_init(void) {
     offset += flash_write_4k_sector(offset, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);    
     
     restore_interrupts(ints);
+
+    if (i2c_pause_acquired) {
+        i2c_external_slave_resume();
+    }
 }
 
 
@@ -179,6 +186,9 @@ bool flash_fatfs_write(int block, uint8_t *buffer, size_t buffer_size) {
     // Temporary buffer for storing a whole flash sector
     uint8_t sector_buffer[FLASH_SECTOR_SIZE];
     
+    // Pause external I2C slave
+    bool i2c_pause_acquired = i2c_external_slave_pause();
+    
     // Temporarily disable USB and interrupts to avoid interference
     stdio_set_driver_enabled(&stdio_usb, false);
     uint32_t ints = save_and_disable_interrupts();
@@ -216,6 +226,11 @@ bool flash_fatfs_write(int block, uint8_t *buffer, size_t buffer_size) {
     // Restore interupts and USB
     restore_interrupts(ints);
     stdio_set_driver_enabled(&stdio_usb, true);
+    
+    // Resume external I2C slave
+    if (i2c_pause_acquired) {
+        i2c_external_slave_resume();
+    }
     
     control_led(false, 0);
     

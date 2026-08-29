@@ -146,7 +146,9 @@ void process_log_task(void) {
  */
 void save_logs_to_file(void) {
 
-    uint32_t available = log_buffer.write_idx - log_buffer.file_idx;
+    uint32_t start_idx = log_buffer.file_idx;
+    uint32_t available = log_buffer.write_idx - start_idx;
+
     if (available == 0) {
         return;
     }
@@ -163,24 +165,62 @@ void save_logs_to_file(void) {
     FRESULT res = f_open(&fp, LOG_FILE_PATH, FA_OPEN_APPEND | FA_WRITE);
     if (res != FR_OK) {
         printf("Open log file failed (%u)\n", res);
+        goto done;
     }
 
-    for (size_t i = 0; i < available; i++) {
-        f_write(
+    uint32_t written_count = 0;
+
+    for (uint32_t i = 0; i < available; i++) {
+        UINT bw = 0;
+
+        res = f_write(
             &fp,
             &log_buffer.buffer[
-                (log_buffer.file_idx + i) & BUFFER_MASK
+                (start_idx + i) & BUFFER_MASK
             ],
             1,
-            NULL
+            &bw
         );
+
+        if (res != FR_OK || bw != 1) {
+            printf(
+                "Write log file failed (%u, %u bytes written)\n",
+                res,
+                bw
+            );
+            break;
+        }
+
+        written_count++;
     }
 
-    log_buffer.file_idx = log_buffer.write_idx;
+    bool synced = false;
 
-    f_sync(&fp);
-    f_close(&fp);
+    if (written_count > 0) {
+        res = f_sync(&fp);
+        if (res == FR_OK) {
+            synced = true;
+        } else {
+            printf("Sync log file failed (%u)\n", res);
+        }
+    }
 
+    FRESULT close_res = f_close(&fp);
+    if (close_res != FR_OK) {
+        printf("Close log file failed (%u)\n", close_res);
+    } else if (!synced && written_count > 0) {
+        /*
+         * f_close() performs its own f_sync(). If it succeeds after an
+         * earlier f_sync() failure, the written data has been committed.
+         */
+        synced = true;
+    }
+
+    if (synced) {
+        log_buffer.file_idx = start_idx + written_count;
+    }
+
+done:
     if (i2c_pause_acquired) {
         i2c_external_slave_resume();
     }

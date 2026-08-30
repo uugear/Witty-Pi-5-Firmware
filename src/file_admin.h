@@ -67,4 +67,11 @@ uint8_t file_admin_load_chunk(void);
  */
 void file_admin_clear_download_state(void);
 
+/**
+ * Check whether a chunked file download session is active.
+ *
+ * @return true while a file download session is in progress
+ */
+bool file_admin_download_is_active(void);
+
 #endif

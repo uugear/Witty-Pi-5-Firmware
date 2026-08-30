@@ -1457,6 +1457,13 @@ void i2c_external_slave_resume(void) {
     external_i2c_slave_active = true;
     external_i2c_pause_depth = 0;
 
+    /*
+     * Start I2C idle timing from the point where the external slave
+     * becomes available again. Time spent while the slave was paused
+     * must not count as bus idle time.
+     */
+    last_external_i2c_active_time = powman_timer_get_ms();
+
     restore_interrupts(irq_state);
 }
 
@@ -1474,4 +1481,22 @@ bool i2c_external_slave_is_quiet(uint32_t quiet_ms) {
         return true;
     }
     return now - last >= quiet_ms;
+}
+
+
+/**
+ * Check whether the download buffer still has unread data.
+ *
+ * @return true if a prepared download packet has unread bytes
+ */
+bool i2c_download_stream_has_pending_data(void) {
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    bool pending =
+        download_buffer_len > 0 &&
+        download_buffer_index >= 0 &&
+        (size_t)download_buffer_index < download_buffer_len;
+
+    restore_interrupts(irq_state);
+    return pending;
 }

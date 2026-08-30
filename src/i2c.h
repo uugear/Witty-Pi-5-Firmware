@@ -337,4 +337,7 @@ void i2c_external_slave_resume(void);
 /** Check whether the external I2C slave has been inactive for at least the specified period. */
 bool i2c_external_slave_is_quiet(uint32_t quiet_ms);
 
+/** Check whether the download buffer still has unread data. */
+bool i2c_download_stream_has_pending_data(void);
+
 #endif

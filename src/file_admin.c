@@ -187,6 +187,10 @@ uint8_t file_admin_load_chunk(void) {
         // End session
         download_state.active = false;
         debug_log("Download complete\n");
+
+        // Flush urgent logs before the client starts consuming the EOF packet.
+        save_logs_to_file_if_urgent();
+
         return ADMIN_STATUS_OK;
     }
 
@@ -240,8 +244,12 @@ uint8_t file_admin_load_chunk(void) {
     download_state.offset += bytes_read;
 
     debug_log("Chunk: %lu bytes (offset now %lu/%lu)\n",
-              (unsigned long)bytes_read, (unsigned long)download_state.offset,
+              (unsigned long)bytes_read,
+              (unsigned long)download_state.offset,
               (unsigned long)download_state.file_size);
+
+    // This is a safe boundary before the client starts consuming the prepared download packet.
+    save_logs_to_file_if_urgent();
 
     return ADMIN_STATUS_OK;
 }
@@ -450,4 +458,13 @@ uint8_t file_admin_delete(uint8_t dir) {
         return ADMIN_STATUS_OK;
     }
     return ADMIN_STATUS_IO_ERROR;
+}
+
+/**
+ * Check whether a chunked file download session is active.
+ *
+ * @return true while a file download session is in progress
+ */
+bool file_admin_download_is_active(void) {
+    return download_state.active;
 }

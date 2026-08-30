@@ -38,4 +38,12 @@ void process_log_task(void);
 void save_logs_to_file(void);
 
 
+/**
+ * Save pending logs if the log buffer is close to full.
+ *
+ * This function may temporarily pause the external I2C slave and should
+ * only be called from a point where such a pause is safe.
+ */
+void save_logs_to_file_if_urgent(void);
+
 #endif

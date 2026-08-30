@@ -13,6 +13,7 @@
 #include "main.h"
 #include "rtc.h"
 #include "i2c.h"
+#include "file_admin.h"
 
 #define MAX_MESSAGE_SIZE    256
 #define BUFFER_SIZE         8192
@@ -22,9 +23,11 @@
 
 #define LOG_FILE_PATH       "/log/WittyPi5.log"
 
-#define SUPPRESS_LOG_FILE_SAVING_US    5000000
+#define SUPPRESS_LOG_FILE_SAVING_US     5000000
 
-#define LOG_SAVE_I2C_QUIET_MS    10
+#define LOG_SAVE_I2C_QUIET_MS           10
+
+#define LOG_DOWNLOAD_STREAM_IDLE_MS     500
 
 typedef struct {
     volatile uint32_t write_idx;
@@ -53,6 +56,12 @@ bool is_log_saving_to_file(void) {
  */
 void log_save_to_file(bool s2f) {
     conf_set(CONF_LOG_TO_FILE, s2f ? 1 : 0);
+}
+
+static bool is_log_file_save_urgent(void) {
+    uint32_t pending_file_bytes = log_buffer.write_idx - log_buffer.file_idx;
+
+    return pending_file_bytes > BUFFER_SIZE - MAX_MESSAGE_SIZE;
 }
 
 static void ms_timestamp_to_str(int64_t ms_timestamp, char *buf) {
@@ -128,12 +137,23 @@ void process_log_task(void) {
     stdio_flush();
 
     // save to file
-    uint32_t pending_file_bytes = log_buffer.write_idx - log_buffer.file_idx;
-    bool emergency_save = pending_file_bytes > BUFFER_SIZE - MAX_MESSAGE_SIZE;
-    bool normal_save = !is_usb_msc_device_mounted() && i2c_external_slave_is_quiet(LOG_SAVE_I2C_QUIET_MS);
+    bool emergency_save = is_log_file_save_urgent();
+    bool i2c_quiet = i2c_external_slave_is_quiet(LOG_SAVE_I2C_QUIET_MS);
+    bool download_stream_pending = i2c_download_stream_has_pending_data();
+    bool download_session_active = file_admin_download_is_active();
+    bool download_stream_protected = download_session_active || download_stream_pending;
+    bool download_stream_save_allowed =
+        !download_stream_protected ||
+        i2c_external_slave_is_quiet(LOG_DOWNLOAD_STREAM_IDLE_MS);
+    bool emergency_save_allowed = download_stream_save_allowed;
+    bool normal_save =
+        download_stream_save_allowed &&
+        !is_usb_msc_device_mounted() &&
+        i2c_quiet;
     if (is_log_saving_to_file() &&
             get_absolute_time() >= SUPPRESS_LOG_FILE_SAVING_US &&
-            (emergency_save || normal_save)) {
+            ((emergency_save && emergency_save_allowed) ||
+             normal_save)) {
         save_logs_to_file();
     }
 
@@ -224,4 +244,20 @@ done:
     if (i2c_pause_acquired) {
         i2c_external_slave_resume();
     }
+}
+
+/**
+ * Save pending logs if the log buffer is close to full.
+ *
+ * This function may temporarily pause the external I2C slave and should
+ * only be called from a point where such a pause is safe.
+ */
+void save_logs_to_file_if_urgent(void) {
+    if (!is_log_saving_to_file() ||
+        get_absolute_time() < SUPPRESS_LOG_FILE_SAVING_US ||
+        !is_log_file_save_urgent()) {
+        return;
+    }
+
+    save_logs_to_file();
 }

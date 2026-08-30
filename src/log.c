@@ -137,24 +137,33 @@ void process_log_task(void) {
     stdio_flush();
 
     // save to file
-    bool emergency_save = is_log_file_save_urgent();
-    bool i2c_quiet = i2c_external_slave_is_quiet(LOG_SAVE_I2C_QUIET_MS);
-    bool download_stream_pending = i2c_download_stream_has_pending_data();
-    bool download_session_active = file_admin_download_is_active();
-    bool download_stream_protected = download_session_active || download_stream_pending;
-    bool download_stream_save_allowed =
-        !download_stream_protected ||
-        i2c_external_slave_is_quiet(LOG_DOWNLOAD_STREAM_IDLE_MS);
-    bool emergency_save_allowed = download_stream_save_allowed;
-    bool normal_save =
-        download_stream_save_allowed &&
-        !is_usb_msc_device_mounted() &&
-        i2c_quiet;
-    if (is_log_saving_to_file() &&
-            get_absolute_time() >= SUPPRESS_LOG_FILE_SAVING_US &&
-            ((emergency_save && emergency_save_allowed) ||
-             normal_save)) {
-        save_logs_to_file();
+    if (!is_log_saving_to_file()) {
+        /*
+         * Logs generated while file logging is disabled are serial-only.
+         * Do not keep them as a backlog for a future re-enable.
+         */
+        log_buffer.file_idx = write_idx;
+    } else {
+        bool emergency_save = is_log_file_save_urgent();
+        bool i2c_quiet = i2c_external_slave_is_quiet(LOG_SAVE_I2C_QUIET_MS);
+        bool download_stream_pending = i2c_download_stream_has_pending_data();
+        bool download_session_active = file_admin_download_is_active();
+        bool download_stream_protected =
+            download_session_active || download_stream_pending;
+        bool download_stream_save_allowed =
+            !download_stream_protected ||
+            i2c_external_slave_is_quiet(LOG_DOWNLOAD_STREAM_IDLE_MS);
+        bool emergency_save_allowed = download_stream_save_allowed;
+        bool normal_save =
+            download_stream_save_allowed &&
+            !is_usb_msc_device_mounted() &&
+            i2c_quiet;
+
+        if (get_absolute_time() >= SUPPRESS_LOG_FILE_SAVING_US &&
+                ((emergency_save && emergency_save_allowed) ||
+                 normal_save)) {
+            save_logs_to_file();
+        }
     }
 
     __dmb();
@@ -166,10 +175,20 @@ void process_log_task(void) {
  */
 void save_logs_to_file(void) {
 
+    uint32_t write_idx = log_buffer.write_idx;
     uint32_t start_idx = log_buffer.file_idx;
-    uint32_t available = log_buffer.write_idx - start_idx;
+    uint32_t available = write_idx - start_idx;
 
     if (available == 0) {
+        return;
+    }
+
+    if (available > BUFFER_SIZE) {
+        printf(
+            "Log file backlog overflow, discarding %u bytes.\n",
+            available
+        );
+        log_buffer.file_idx = write_idx;
         return;
     }
 

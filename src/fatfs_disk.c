@@ -319,6 +319,7 @@ int load_file(const char *path, char *buffer, int buf_size) {
     int file_size = f_size(&file);
     if (file_size > buf_size) {
         debug_log("Error: The size of file (%s) exceeds buffer size: %d\n", path, file_size);
+        f_close(&file);
         return -1;
     }
 

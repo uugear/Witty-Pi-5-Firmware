@@ -45,21 +45,39 @@ DSTATUS disk_initialize(BYTE drv) {
 
 
 DRESULT disk_read(BYTE drv, BYTE *buff, LBA_t sector, UINT count) {
-    
-    if (sector > FAT_BLOCK_NUM) {
-        return RES_ERROR;
+
+    if (count == 0 ||
+        sector >= FAT_BLOCK_NUM ||
+        count > FAT_BLOCK_NUM - sector) {
+        return RES_PARERR;
     }
-    flash_fatfs_read(sector, (uint8_t *)buff, FAT_BLOCK_SIZE * count);
+
+    flash_fatfs_read(
+        sector,
+        (uint8_t *)buff,
+        FAT_BLOCK_SIZE * count
+    );
+
     return RES_OK;
 }
 
 
 DRESULT disk_write(BYTE drv, const BYTE *buff, LBA_t sector, UINT count) {
-    
+
+    if (count == 0 ||
+        sector >= FAT_BLOCK_NUM ||
+        count > FAT_BLOCK_NUM - sector) {
+        return RES_PARERR;
+    }
+
     usb_msc_ensure_ejected();   // Eject USB MSC device first
-    
-    flash_fatfs_write(sector, (uint8_t *)buff, FAT_BLOCK_SIZE * count);
-    
+
+    flash_fatfs_write(
+        sector,
+        (uint8_t *)buff,
+        FAT_BLOCK_SIZE * count
+    );
+
     return RES_OK;
 }
 

@@ -11,6 +11,8 @@
 #define PRODUCT_NAME            "Witty Pi 5"
 
 #define I2C_SLAVE_ADDR          0x51
+#define I2C_SLAVE_ADDR_MIN      0x08
+#define I2C_SLAVE_ADDR_MAX      0x77
 
 #define STATE_OFF               0
 #define STATE_STARTING          1

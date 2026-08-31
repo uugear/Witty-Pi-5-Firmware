@@ -111,6 +111,40 @@ static bool conf_sanitize_bool_value(conf_obj_t *obj, const char *key, uint8_t d
 }
 
 
+static bool conf_sanitize_range_value(
+    conf_obj_t *obj,
+    const char *key,
+    uint8_t min_value,
+    uint8_t max_value,
+    uint8_t default_value
+) {
+    if (!obj || !key) {
+        return false;
+    }
+
+    for (int i = 0; i < obj->count; i++) {
+        if (strcmp(obj->items[i].key, key) == 0) {
+            uint8_t value = obj->items[i].value;
+
+            if (value < min_value || value > max_value) {
+                debug_log(
+                    "Invalid %s=%d, reset to default %d.\n",
+                    key,
+                    value,
+                    default_value
+                );
+                obj->items[i].value = default_value;
+                return true;
+            }
+
+            return false;
+        }
+    }
+
+    return false;
+}
+
+
 static bool conf_sanitize(conf_obj_t *obj) {
     bool changed = false;
 
@@ -118,6 +152,13 @@ static bool conf_sanitize(conf_obj_t *obj) {
         return false;
     }
 
+    changed |= conf_sanitize_range_value(
+        obj,
+        CONF_ADDRESS,
+        I2C_SLAVE_ADDR_MIN,
+        I2C_SLAVE_ADDR_MAX,
+        I2C_SLAVE_ADDR
+    );
     changed |= conf_sanitize_bool_value(obj, CONF_PS_PRIORITY, 0);
     changed |= conf_sanitize_bool_value(obj, CONF_VIN_HOT_STANDBY, 0);
 

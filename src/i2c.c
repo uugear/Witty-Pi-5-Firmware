@@ -31,7 +31,6 @@
 
 #define I2C_SLAVE_SDA_PIN		6
 #define I2C_SLAVE_SCL_PIN		7
-#define I2C_SLAVE_ADDRESS		0x51
 
 #define I2C_MASTER_BAUDRATE     400000	// 400 kHz
 #define I2C_SLAVE_BAUDRATE      100000	// 100 kHz
@@ -136,6 +135,7 @@ uint64_t heartbeat_update_time = 0;
 static volatile uint64_t last_external_i2c_active_time = 0;
 
 static bool external_i2c_slave_active = false;
+static uint8_t active_i2c_slave_address = I2C_SLAVE_ADDR;
 
 static uint32_t external_i2c_pause_depth = 0;
 
@@ -791,7 +791,15 @@ void set_config_register(uint8_t index, uint8_t value) {
 
     switch (index) {
         case I2C_CONF_ADDRESS:
-            conf_set(CONF_ADDRESS, value);
+            if (value >= I2C_SLAVE_ADDR_MIN &&
+                value <= I2C_SLAVE_ADDR_MAX) {
+                conf_set(CONF_ADDRESS, value);
+            } else {
+                debug_log(
+                    "Invalid I2C slave address ignored: 0x%02X\n",
+                    value
+                );
+            }
             break;
 
         case I2C_CONF_DEFAULT_ON_DELAY:
@@ -1159,10 +1167,20 @@ void i2c_devices_init(void) {
     gpio_set_function(I2C_SLAVE_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SLAVE_SCL_PIN);
 
+    active_i2c_slave_address = conf_get(CONF_ADDRESS);
     i2c_init(i2c1, I2C_SLAVE_BAUDRATE);
-    wp5_i2c_slave_init(i2c1, I2C_SLAVE_ADDRESS, &i2c_slave_handler);
+    wp5_i2c_slave_init(
+        i2c1,
+        active_i2c_slave_address,
+        &i2c_slave_handler
+    );
 
     external_i2c_slave_active = true;
+
+    debug_log(
+        "External I2C slave address: 0x%02X\n",
+        active_i2c_slave_address
+    );
 }
 
 
@@ -1450,7 +1468,7 @@ void i2c_external_slave_resume(void) {
      */
     wp5_i2c_slave_init(
         i2c1,
-        I2C_SLAVE_ADDRESS,
+        active_i2c_slave_address,
         &i2c_slave_handler
     );
 

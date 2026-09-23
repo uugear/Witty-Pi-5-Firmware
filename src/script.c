@@ -777,6 +777,12 @@ bool load_script(bool run) {
     bool actions_found = false;
     
     if (file_exists(SKD_SCRIPT_PATH)) {
+        // Refresh current time after potentially lengthy conversion.
+        cur_time = rtc_get_timestamp(&valid);
+        if (!valid) {
+            debug_log("Current time is invalid, skip schedule script.\n");
+            return false;
+        }
         if (find_next_actions_from_skd(SKD_SCRIPT_PATH, cur_time, startup_first, &startup, &shutdown)) {
             debug_log("Found future actions from %s\n", SKD_SCRIPT_PATH);
         } else {

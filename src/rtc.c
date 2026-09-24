@@ -311,39 +311,78 @@ void on_alarm_conf_changed(const char *key, uint8_t old_val, uint8_t new_val) {
  */ 
 void rtc_init(gpio_event_callback_t callback) {
 
-	powman_timer_start();
+    powman_timer_start();
 
-    uint8_t status = get_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER);
-    uint8_t mask = BIT_VALUE(VLF) | BIT_VALUE(VDET);
-    if(status & mask) {
-        set_virtual_register(I2C_VREG_RX8025_CONTROL_REGISTER, BIT_VALUE(RESET)); // Initialize a reset
+    /*
+     * Recover RX8025 only when its retained data may be unreliable.
+     * VLF indicates that clock operation or internal data may have
+     * been affected by a supply voltage drop.
+     */
+    uint8_t status =
+        get_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER);
+
+    if (status & BIT_VALUE(VLF)) {
+
+        set_virtual_register(
+            I2C_VREG_RX8025_CONTROL_REGISTER,
+            BIT_VALUE(RESET)
+        );
+
+        /*
+         * Clearing the flag register is appropriate here because VLF
+         * indicates that the retained RTC state is not reliable.
+         */
+        set_virtual_register(
+            I2C_VREG_RX8025_FLAG_REGISTER,
+            0x00
+        );
     }
 
-    set_virtual_register(I2C_VREG_RX8025_EXTENSION_REGISTER, BIT_VALUE(WADA));  // Date as alarm trigger
+    /*
+     * Configure normal RTC operation.
+     *
+     * Do not clear the flag register during normal initialization.
+     * AF may represent an alarm that occurred while the RP2350 was
+     * waking from hibernation and must remain pending until handled.
+     */
+    set_virtual_register(
+        I2C_VREG_RX8025_EXTENSION_REGISTER,
+        BIT_VALUE(WADA)
+    );
 
-    set_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER, 0x00);
+    set_virtual_register(
+        I2C_VREG_RX8025_CONTROL_REGISTER,
+        INT_2_SEC | BIT_VALUE(AIE)
+    );
 
-    set_virtual_register(I2C_VREG_RX8025_CONTROL_REGISTER, (INT_2_SEC | BIT_VALUE(AIE)));   // Enable alarm
-    
-	rtc_sync_powman_timer();
+    rtc_sync_powman_timer();
 
     rtc_alarm_callback = callback;
-    
+
     gpio_init(GPIO_RTC_INT);
     gpio_set_dir(GPIO_RTC_INT, GPIO_IN);
     gpio_pull_up(GPIO_RTC_INT);
-	gpio_register_callback(GPIO_RTC_INT, GPIO_IRQ_EDGE_FALL, rtc_alarm_occurred);
-	
-	add_alarm_in_us(SYNC_TIME_INTERVAL_US, sync_time_callback, NULL, true);
-	
-	register_item_changed_callback(CONF_ALARM1_SECOND, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM1_MINUTE, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM1_HOUR, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM1_DAY, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM2_SECOND, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM2_MINUTE, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM2_HOUR, on_alarm_conf_changed);
-	register_item_changed_callback(CONF_ALARM2_DAY, on_alarm_conf_changed);
+    gpio_register_callback(
+        GPIO_RTC_INT,
+        GPIO_IRQ_EDGE_FALL,
+        rtc_alarm_occurred
+    );
+
+    add_alarm_in_us(
+        SYNC_TIME_INTERVAL_US,
+        sync_time_callback,
+        NULL,
+        true
+    );
+
+    register_item_changed_callback(CONF_ALARM1_SECOND, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM1_MINUTE, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM1_HOUR, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM1_DAY, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM2_SECOND, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM2_MINUTE, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM2_HOUR, on_alarm_conf_changed);
+    register_item_changed_callback(CONF_ALARM2_DAY, on_alarm_conf_changed);
 }
 
 
@@ -880,4 +919,15 @@ void rtc_process_pending_alarm_conf(void) {
         alarm2_conf_changed_pending = false;
         rtc_apply_alarm2_conf();
     }
+}
+
+
+/**
+ * Check if there is alarm currently pending
+ *
+ * @return true if alarm is pending, otherwise false
+ */
+bool rtc_is_alarm_pending(void) {
+    uint8_t status = get_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER);
+    return (status & BIT_VALUE(AF)) != 0;
 }

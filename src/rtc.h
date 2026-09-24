@@ -202,4 +202,12 @@ void rtc_restore_alarm_type_after_hibernate(uint8_t type);
  */
 void rtc_process_pending_alarm_conf(void);
 
+
+/**
+ * Check if there is alarm currently pending
+ *
+ * @return true if alarm is pending, otherwise false
+ */
+bool rtc_is_alarm_pending(void);
+
 #endif

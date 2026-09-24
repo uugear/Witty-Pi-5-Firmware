@@ -299,6 +299,8 @@ int main() {
 
     i2c_devices_init(); // Initialize I2C devices
 
+    hibernate_init();   // Initialize hibernation manager
+
     rtc_init(rtc_alarm_occuried_callback); // Initialize RTC
 
     ts_init(ts_below_temperature_callback, ts_over_temperature_callback); // Initialize temperature sensor
@@ -311,19 +313,28 @@ int main() {
 
 	led_init();	// Initialize LED controller
 
-	hibernate_init();   // Initialize hibernation manager
 	bool resumed_from_hibernate = hibernate_was_resumed();
 	if (resumed_from_hibernate) {
 
     	uint32_t wake_flags = hibernate_get_wakeup_flags();
+    	bool rtc_alarm_pending = rtc_is_alarm_pending();
 
-        if (wake_flags & WAKEUP_SOURCE_BUTTON) {
-            debug_log("Woke up by button.\n");
-            request_startup(ACTION_REASON_BUTTON_CLICK);
-        } else if (wake_flags & WAKEUP_SOURCE_RTC) {
-            debug_log("Woke up by RTC alarm.\n");
+        /*
+         * A pending RTC alarm must be handled even when another wake source
+         * woke the RP2350 first. Otherwise the alarm may remain unprocessed.
+         */
+        if ((wake_flags & WAKEUP_SOURCE_RTC) || rtc_alarm_pending) {
+            if (wake_flags & WAKEUP_SOURCE_RTC) {
+                debug_log("Woke up by RTC alarm.\n");
+            } else {
+                debug_log("RTC alarm occurred during another wake event.\n");
+            }
             rtc_alarm_occuried_callback();
             rtc_clear_alarm_flag();
+
+        } else if (wake_flags & WAKEUP_SOURCE_BUTTON) {
+            debug_log("Woke up by button.\n");
+            request_startup(ACTION_REASON_BUTTON_CLICK);
         } else if (wake_flags & WAKEUP_SOURCE_TS) {
             debug_log("Woke up by temperature alert.\n");
             ts_process_alert();
@@ -346,6 +357,13 @@ int main() {
                 }
             }
         }
+    } else if (rtc_is_alarm_pending()) {
+        /*
+         * There is no valid hibernation context, so the pending RTC alarm
+         * cannot be associated reliably with a saved scheduled action.
+         */
+        debug_log("Clear stale RTC alarm flag after non-hibernation startup.\n");
+        rtc_clear_alarm_flag();
     }
     
     board_init();

@@ -32,35 +32,50 @@ add_compile_definitions(PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
 pico_sdk_init()
 
 file(GLOB_RECURSE SOURCES "src/*.c")
-add_executable(${PROJECT_NAME} ${SOURCES}
-    ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source/ff.c
-)
 
-target_sources(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave/wp5_i2c_slave.c
-)
 
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source
-    ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave
-    ${PICO_SDK_PATH}/src/rp2_common/pico_i2c_slave/include
-)
+function(add_wp5_firmware TARGET_NAME PRODUCT)
 
-# pull in dependencies
-target_link_libraries(${PROJECT_NAME}
-    pico_stdlib
-    tinyusb_board
-    tinyusb_device
-    hardware_powman
-    hardware_i2c
-    hardware_adc
-    hardware_irq
-)
+    add_executable(${TARGET_NAME}
+        ${SOURCES}
+        ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source/ff.c
+    )
 
-# enable usb output and uart output
-pico_enable_stdio_usb(${PROJECT_NAME} 1)
-pico_enable_stdio_uart(${PROJECT_NAME} 1)
+    target_compile_definitions(${TARGET_NAME} PRIVATE
+        WP5_PRODUCT=${PRODUCT}
+    )
 
-# create map/bin/hex/uf2 file etc.
-pico_add_extra_outputs(${PROJECT_NAME})
+    target_sources(${TARGET_NAME} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave/wp5_i2c_slave.c
+    )
+
+    target_include_directories(${TARGET_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${PICO_SDK_PATH}/lib/tinyusb/lib/fatfs/source
+        ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave
+        ${PICO_SDK_PATH}/src/rp2_common/pico_i2c_slave/include
+    )
+
+    # Pull in dependencies
+    target_link_libraries(${TARGET_NAME}
+        pico_stdlib
+        tinyusb_board
+        tinyusb_device
+        hardware_powman
+        hardware_i2c
+        hardware_adc
+        hardware_irq
+    )
+
+    # Enable USB output and UART output
+    pico_enable_stdio_usb(${TARGET_NAME} 1)
+    pico_enable_stdio_uart(${TARGET_NAME} 1)
+
+    # Create map/bin/hex/uf2 files etc.
+    pico_add_extra_outputs(${TARGET_NAME})
+
+endfunction()
+
+
+add_wp5_firmware(wp5fw_hat_plus 1)
+add_wp5_firmware(wp5fw_mini 2)

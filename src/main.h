@@ -2,13 +2,11 @@
 #define _MAIN_H_
 
 #include <stdbool.h>
+#include "product.h"
 
 
-#define FIRMWARE_ID 			0x51
 #define FIRMWARE_VERSION_MAJOR	1
 #define FIRMWARE_VERSION_MINOR	6
-
-#define PRODUCT_NAME            "Witty Pi 5"
 
 #define I2C_SLAVE_ADDR          0x51
 #define I2C_SLAVE_ADDR_MIN      0x08

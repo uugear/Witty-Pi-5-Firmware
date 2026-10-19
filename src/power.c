@@ -95,19 +95,92 @@ static void power_ensure_dcdc_enabled(void) {
 
 
 static void power_update_dcdc_for_vusb_mode(void) {
+#if WP5_PRODUCT == PRODUCT_WITTY_PI_5_MINI
+    /*
+     * Witty Pi 5 Mini uses a common 5V node for USB-C and the
+     * optional external DC/DC output. When VUSB is selected as
+     * the actual power source, the external DC/DC must be disabled.
+     * VIN_HOT_STANDBY is not applicable to Witty Pi 5 Mini.
+     */
+    gpio_put(GPIO_DCDC_ENABLE, false);
+#else
     if (!power_is_vin_hot_standby_enabled()) {
         gpio_put(GPIO_DCDC_ENABLE, false);
         return;
     }
-    // Do not check LOW_VOLTAGE here.
-    // Hot standby only needs VIN to be high enough for the DC/DC converter to generate 5V. 
+    // The onboard DC/DC converter on Witty Pi 5 HAT+ requires sufficient VIN.
     uint16_t vin = get_vin_mv();
     if (vin >= MIN_VIN_MV) {
         power_ensure_dcdc_enabled();
     } else {
         gpio_put(GPIO_DCDC_ENABLE, false);
     }
+#endif
 }
+
+
+#if WP5_PRODUCT == PRODUCT_WITTY_PI_5_MINI
+static bool power_control_pi_power_on_mini(uint8_t source) {
+
+    if (source == POWER_SOURCE_PRIORITY_VUSB) {
+        uint16_t vusb = get_vusb_mv();
+        if (vusb < MIN_VUSB_MV) {
+            power_mode = POWER_MODE_NONE;
+            debug_log("Vusb is too low to power Raspberry Pi: Vusb=%dmV\n", vusb);
+            return false;
+        }
+
+        power_update_dcdc_for_vusb_mode();
+
+        gpio_put(GPIO_PI_POWER_CTRL, true);
+        power_mode = POWER_MODE_VUSB;
+        current_rpi_state = STATE_STARTING;
+        reset_heatbeat_checking_timer();
+
+        debug_log("Raspberry Pi is powered by Vusb (%dmV).\n", vusb);
+        return true;
+    }
+
+    if (source == POWER_SOURCE_PRIORITY_VIN) {
+        /*
+         * VIN mode on Witty Pi 5 Mini means that the 5V rail is supplied
+         * by an external DC/DC converter. The firmware must not assume
+         * any minimum VIN because the converter may be buck, boost,
+         * or buck-boost.
+         */
+        power_ensure_dcdc_enabled();
+
+        uint16_t vusb = get_vusb_mv();
+        uint16_t vin = get_vin_mv();
+
+        /*
+         * VUSB measures the common 5V rail on Witty Pi 5 Mini, so it can
+         * be used to verify that the external DC/DC output is available.
+         */
+        if (vusb < MIN_VUSB_MV) {
+            power_mode = POWER_MODE_NONE;
+            debug_log(
+                "DC/DC output is too low to power Raspberry Pi: Vusb=%dmV, Vin=%dmV\n",
+                vusb,
+                vin
+            );
+            return false;
+        }
+
+        gpio_put(GPIO_PI_POWER_CTRL, true);
+        power_mode = POWER_MODE_VIN;
+        current_rpi_state = STATE_STARTING;
+        reset_heatbeat_checking_timer();
+
+        debug_log("Raspberry Pi is powered by Vin (%dmV).\n", vin);
+        return true;
+    }
+
+    power_mode = POWER_MODE_NONE;
+    debug_log("Unknown power source setting: %d\n", source);
+    return false;
+}
+#endif
 
 
 // Callback when system up timeout
@@ -225,6 +298,12 @@ bool power_control_pi_power(bool on) {
             return false;
         }
         uint8_t priority = power_get_valid_source_priority();
+
+#if WP5_PRODUCT == PRODUCT_WITTY_PI_5_MINI
+        // Witty Pi 5 Mini source selection logic
+        return power_control_pi_power_on_mini(priority);
+#else
+        // Witty Pi 5 HAT+ source selection logic
         if (priority == POWER_SOURCE_PRIORITY_VUSB) {   // VUSB has priority
             uint16_t vusb = get_vusb_mv();
             if (vusb >= MIN_VUSB_MV) {  // Vusb is high enough
@@ -283,6 +362,7 @@ bool power_control_pi_power(bool on) {
             debug_log("Unkown power source priority: %d\n", priority);
             return false;
         }
+#endif
     } else {    // Try to cut Raspberry Pi's power
         if (gpio_get(GPIO_PI_POWER_CTRL) == false) {
             debug_log("Can not cut power: Pi is not powered.\n");
@@ -450,6 +530,50 @@ uint8_t rpi_off_intermittent_task(void) {
 }
 
 
+#if WP5_PRODUCT == PRODUCT_WITTY_PI_5_MINI
+static int power_source_polling_mini(uint8_t source) {
+
+    if (source == POWER_SOURCE_PRIORITY_VUSB) {
+        /*
+         * On Witty Pi 5 Mini, the configured source is authoritative.
+         * Do not try to infer the source from VIN/VUSB voltage levels.
+         */
+        power_update_dcdc_for_vusb_mode();
+        power_mode = POWER_MODE_VUSB;
+        power_low_counter = 0;
+        return POWERED_BY_VUSB_NO_ACTION;
+    }
+
+    if (source == POWER_SOURCE_PRIORITY_VIN) {
+
+        power_ensure_dcdc_enabled();
+
+        power_mode = POWER_MODE_VIN;
+
+        uint16_t vin = get_vin_mv();
+        uint16_t vlow = conf_get(CONF_LOW_VOLTAGE) * 100;
+
+        if (vlow == 0 || vin >= vlow) {
+            power_low_counter = 0;
+            return POWERED_BY_VIN_NO_ACTION;
+        }
+
+        power_low_counter++;
+
+        if (power_low_counter > MAX_POWER_LOW_COUNTER) {
+            vin_recoverable = true;
+            debug_log("Power low: Vin=%dmV, Vlow=%dmV\n", vin, vlow);
+            request_shutdown(false, ACTION_REASON_VIN_DROP);
+            return POWER_LOW_SHUTDOWN;
+        }
+
+        return POWER_LOW_PENDING;
+    }
+
+    return PI_NOT_POWERED;
+}
+#endif
+
 /**
  * Poll power sources and decide the current power mode.
  * Will also request startup/shutdown according to configuration.
@@ -461,7 +585,10 @@ int power_source_polling(void) {
 	uint8_t priority = power_get_valid_source_priority();
 	
 	if (gpio_get(GPIO_PI_POWER_CTRL) == true) {     // Raspberry Pi is powered
-		
+
+#if WP5_PRODUCT == PRODUCT_WITTY_PI_5_MINI
+        return power_source_polling_mini(priority);
+#else
 		if (priority == POWER_SOURCE_PRIORITY_VUSB) {   // VUSB has prioity
 			
 			uint16_t vusb = get_vusb_mv();
@@ -522,6 +649,7 @@ int power_source_polling(void) {
 			    return POWERED_BY_VUSB_NO_ACTION;
 			}
 		}
+#endif
 	} else {    // Raspberry Pi is not powered
 		power_mode = POWER_MODE_NONE;
 		

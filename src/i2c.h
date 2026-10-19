@@ -53,7 +53,7 @@
 #define I2C_CONF_LOW_VOLTAGE        22  // [0x16] Low voltage threshold (x10), 0=disabled
 #define I2C_CONF_RECOVERY_VOLTAGE   23  // [0x17] Voltage (x10) that triggers recovery, 0=disabled
  
-#define I2C_CONF_PS_PRIORITY        24  // [0x18] Power source priority, 0=Vusb first, 1=Vin first
+#define I2C_CONF_PS_PRIORITY        24  // [0x18] HAT+: source priority; Mini: actual source (0=VUSB, 1=VIN)
  
 #define I2C_CONF_ADJ_VUSB           25  // [0x19] Adjustment for measured Vusb (x100), range from -127 to 127
 #define I2C_CONF_ADJ_VIN            26  // [0x1A] Adjustment for measured Vin (x100), range from -127 to 127
@@ -94,7 +94,7 @@
  
 #define I2C_CONF_SYS_CLOCK_MHZ		54	// [0x36] System clock (in MHz) for RP2350: default=48 (required for USB drive and USB-uart)
 
-#define I2C_CONF_VIN_HOT_STANDBY    55  // [0x37] Keep VIN DC/DC enabled in VUSB-first mode, 0=off, 1=on
+#define I2C_CONF_VIN_HOT_STANDBY    55  // [0x37] HAT+ only: keep VIN DC/DC enabled in VUSB-first mode (0=off, 1=on); ignored by Mini
 
 #define I2C_CONF_LAST               63  // ------
 #define I2C_ADMIN_FIRST             64  // ------

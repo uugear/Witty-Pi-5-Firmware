@@ -6,7 +6,7 @@
 
 
 #define FIRMWARE_VERSION_MAJOR	1
-#define FIRMWARE_VERSION_MINOR	6
+#define FIRMWARE_VERSION_MINOR	7
 
 #define I2C_SLAVE_ADDR          0x51
 #define I2C_SLAVE_ADDR_MIN      0x08

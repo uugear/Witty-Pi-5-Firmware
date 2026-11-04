@@ -13,8 +13,11 @@ cd Witty-Pi-5-Firmware
 
 git submodule update --init --recursive lib/pico-sdk
 
-mkdir build
-cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target wp5fw_hat_plus --clean-first -j$(nproc)
 ```
+Recommended verification:
+```bash
+python3 tools/verify_adc_start2.py build/wp5fw_hat_plus.elf
+```
+Three "PASS:" in output is considered as a good result.

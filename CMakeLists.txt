@@ -47,6 +47,7 @@ function(add_wp5_firmware TARGET_NAME PRODUCT)
 
     target_sources(${TARGET_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/compat/pico_i2c_slave/wp5_i2c_slave.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/adc_start2.S
     )
 
     target_include_directories(${TARGET_NAME} PRIVATE

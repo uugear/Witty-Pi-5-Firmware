@@ -318,12 +318,23 @@ int main() {
 
     	uint32_t wake_flags = hibernate_get_wakeup_flags();
     	bool rtc_alarm_pending = rtc_is_alarm_pending();
+        bool rtc_alarm_armed = rtc_get_alarm_type() != ALARM_TYPE_NONE;
 
         /*
-         * A pending RTC alarm must be handled even when another wake source
-         * woke the RP2350 first. Otherwise the alarm may remain unprocessed.
+         * A disabled alarm may still set AF. Do not treat a stale flag or
+         * wake-source latch as a scheduled startup/shutdown action, and do
+         * not let it mask a simultaneous button/temperature/timer wake.
          */
-        if ((wake_flags & WAKEUP_SOURCE_RTC) || rtc_alarm_pending) {
+        if (!rtc_alarm_armed && rtc_alarm_pending) {
+            rtc_clear_alarm_flag();
+            rtc_alarm_pending = false;
+        }
+
+        /*
+         * A pending armed RTC alarm must be handled even when another wake
+         * source woke the RP2350 first.
+         */
+        if (rtc_alarm_armed && ((wake_flags & WAKEUP_SOURCE_RTC) || rtc_alarm_pending)) {
             if (wake_flags & WAKEUP_SOURCE_RTC) {
                 debug_log("Woke up by RTC alarm.\n");
             } else {

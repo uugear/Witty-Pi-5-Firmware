@@ -86,6 +86,10 @@ static bool alarm2_conf_changed_pending = false;
 static absolute_time_t alarm_conf_apply_after;
 static bool alarm_conf_apply_scheduled = false;
 
+static bool rtc_set_alarm_interrupt_enabled(bool enabled);
+static bool rtc_clear_alarm_flag_checked(void);
+static bool rtc_update_alarm(int8_t day, int8_t hour, int8_t min, bool startup);
+
 static inline bool is_pow_2(uint8_t n) {
     if (n == 0) return false;
     return (n & (n - 1)) == 0;
@@ -336,6 +340,9 @@ void rtc_init(gpio_event_callback_t callback) {
             I2C_VREG_RX8025_FLAG_REGISTER,
             0x00
         );
+
+        // A restored alarm cannot be trusted after RTC voltage loss.
+        alarm_type = ALARM_TYPE_NONE;
     }
 
     /*
@@ -350,10 +357,15 @@ void rtc_init(gpio_event_callback_t callback) {
         BIT_VALUE(WADA)
     );
 
-    set_virtual_register(
-        I2C_VREG_RX8025_CONTROL_REGISTER,
-        INT_2_SEC | BIT_VALUE(AIE)
-    );
+    /*
+     * Only drive the RTC alarm output when a scheduled action exists.
+     * The RTC may retain three AE=1 fields (alarm every minute), but
+     * without an armed action they must not produce an interrupt.
+     * Preserve AF here: it may represent an alarm during hibernation.
+     */
+    if (!rtc_set_alarm_interrupt_enabled(alarm_type != ALARM_TYPE_NONE)) {
+        debug_log("Failed to configure RTC alarm interrupt.\n");
+    }
 
     rtc_sync_powman_timer();
 
@@ -510,34 +522,110 @@ void rtc_sync_powman_timer(void) {
 
 
 /**
- * Clear RTC alarm flag (so alarm can occur again)
+ * Enable or disable the RX8025 alarm interrupt output.
+ * An alarm may still set AF while AIE is disabled.
  */
-void rtc_clear_alarm_flag(void) {
-    uint8_t status = get_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER);
-    set_virtual_register(I2C_VREG_RX8025_FLAG_REGISTER, (status & (~BIT_VALUE(AF))));
+static bool rtc_set_alarm_interrupt_enabled(bool enabled) {
+    uint8_t control = INT_2_SEC | (enabled ? BIT_VALUE(AIE) : 0);
+    return set_virtual_register(I2C_VREG_RX8025_CONTROL_REGISTER, control) == 1;
 }
 
 
 /**
- * Set RTC alarm
+ * Clear the alarm flag without changing other RTC status flags.
+ * Unlike the virtual-register getter, this read reports I2C errors.
+ */
+static bool rtc_clear_alarm_flag_checked(void) {
+    uint8_t status;
+    if (i2c_read_from_slave(RX8025_ADDRESS, RX8025_RTC_FLAG, &status, 1) != 1) {
+        return false;
+    }
+    status &= (uint8_t)~BIT_VALUE(AF);
+    return i2c_write_to_slave(RX8025_ADDRESS, RX8025_RTC_FLAG, &status, 1) == 1;
+}
+
+
+/**
+ * Clear RTC alarm flag (so alarm can occur again).
+ */
+void rtc_clear_alarm_flag(void) {
+    (void)rtc_clear_alarm_flag_checked();
+}
+
+
+/**
+ * Set or cancel the active RTC alarm.
+ *
+ * The RTC uses one shared alarm comparator for startup and shutdown.
+ * Cancelling an inactive type must not modify the active comparator.
+ * Disable AIE before changing comparison fields, then clear any stale
+ * AF and re-enable AIE only after the new alarm is fully programmed.
+ *
+ * @return true if the requested update succeeded
+ */
+static bool rtc_update_alarm(int8_t day, int8_t hour, int8_t min, bool startup) {
+    const uint8_t requested_type = startup ? ALARM_TYPE_STARTUP : ALARM_TYPE_SHUTDOWN;
+    const bool cancel = day == 0 && hour == 0 && min == 0;
+
+    if (cancel && alarm_type != ALARM_TYPE_NONE && alarm_type != requested_type) {
+        return true;
+    }
+
+    // Reject invalid alarms, including a configuration matching every minute.
+    if (!cancel &&
+        (day < -1 || day > 31 || hour < -1 || hour > 23 ||
+         min < -1 || min > 59 ||
+         (day == -1 && hour == -1 && min == -1) ||
+         day == 0)) {
+        debug_log("Reject invalid RTC alarm parameters.\n");
+        return false;
+    }
+
+    if (!rtc_set_alarm_interrupt_enabled(false)) {
+        debug_log("Failed to disable RTC alarm interrupt.\n");
+        return false;
+    }
+
+    // From this point the previously armed alarm is no longer active.
+    alarm_type = ALARM_TYPE_NONE;
+
+    if (cancel) {
+        if (!rtc_clear_alarm_flag_checked()) {
+            debug_log("Failed to clear cancelled RTC alarm flag.\n");
+            return false;
+        }
+        return true;
+    }
+
+    if (set_virtual_register(I2C_VREG_RX8025_DAY_ALARM,
+                             day >= 0 ? dec_to_bcd(day) : AE_MASK) != 1 ||
+        set_virtual_register(I2C_VREG_RX8025_HOUR_ALARM,
+                             hour >= 0 ? dec_to_bcd(hour) : AE_MASK) != 1 ||
+        set_virtual_register(I2C_VREG_RX8025_MIN_ALARM,
+                             min >= 0 ? dec_to_bcd(min) : AE_MASK) != 1 ||
+        !rtc_clear_alarm_flag_checked() ||
+        !rtc_set_alarm_interrupt_enabled(true)) {
+        // A partial configuration must not be treated as an armed alarm.
+        rtc_set_alarm_interrupt_enabled(false);
+        debug_log("Failed to program RTC alarm.\n");
+        return false;
+    }
+
+    alarm_type = requested_type;
+    return true;
+}
+
+
+/**
+ * Set RTC alarm.
  *
  * @param day The day of alarm, use negative value to skip
  * @param hour The hour of alarm, use negative value to skip
  * @param min The minute of alarm, use negative value to skip
  * @param startup Whether the alarm is for startup
- * @return true if set successfully, false otherwise
  */
 void rtc_set_alarm(int8_t day, int8_t hour, int8_t min, bool startup) {
-    set_virtual_register(I2C_VREG_RX8025_DAY_ALARM, day >= 0 ? dec_to_bcd(day) : AE_MASK);
-    set_virtual_register(I2C_VREG_RX8025_HOUR_ALARM, hour >= 0 ? dec_to_bcd(hour) : AE_MASK);
-    set_virtual_register(I2C_VREG_RX8025_MIN_ALARM, min >= 0 ? dec_to_bcd(min) : AE_MASK);
-    if (day != 0 || hour != 0 || min != 0) {
-		alarm_type = startup ? ALARM_TYPE_STARTUP : ALARM_TYPE_SHUTDOWN;
-	} else {
-		if ((alarm_type == ALARM_TYPE_STARTUP && startup) || (alarm_type == ALARM_TYPE_SHUTDOWN && !startup)) {
-			alarm_type = ALARM_TYPE_NONE;
-		}
-	}
+    (void)rtc_update_alarm(day, hour, min, startup);
 }
 
 
@@ -876,9 +964,13 @@ bool load_and_schedule_alarm(bool startup) {
 
     if (adjust_action_time_for_dst(&scheduled_ts)) {
         timestamp_to_datetime(scheduled_ts, &dt);
-        rtc_set_alarm(dt.day, dt.hour, dt.min, startup);
+        if (!rtc_update_alarm(dt.day, dt.hour, dt.min, startup)) {
+            return false;
+        }
     } else {
-        rtc_set_alarm(day, hour, min, startup);
+        if (!rtc_update_alarm(day, hour, min, startup)) {
+            return false;
+        }
         debug_log("Set Alarm %02d %02d:%02d for %s\n",
                   day, hour, min, startup ? "startup" : "shutdown");
     }

@@ -79,7 +79,23 @@ bool can_temperature_turn_off_rpi(void);
 
 
 /**
- * Process temperature alert
+ * Capture a pending SMBus alert before TMP112 initialization reads any registers.
+ *
+ * @return 0 for over-temperature, 1 for below-temperature, or -1 if unavailable
+ */
+int ts_capture_alert_status(void);
+
+
+/**
+ * Process a previously captured temperature alert using initialized callbacks.
+ *
+ * @param status Status returned by ts_capture_alert_status()
+ */
+void ts_process_captured_alert(int status);
+
+
+/**
+ * Process temperature alert during normal operation.
  */
 void ts_process_alert(void);
 

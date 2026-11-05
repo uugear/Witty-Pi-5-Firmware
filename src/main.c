@@ -301,6 +301,16 @@ int main() {
 
     hibernate_init();   // Initialize hibernation manager
 
+    bool resumed_from_hibernate = hibernate_was_resumed();
+    int hibernate_ts_alert_status = -1;
+    if (resumed_from_hibernate &&
+        ((hibernate_get_wakeup_flags() & WAKEUP_SOURCE_TS) ||
+         !gpio_get(GPIO_TS_INT))) {
+        // TMP112 register reads during ts_init() clear pending alerts.
+        // Capture an alert even if it coincides with another wake source.
+        hibernate_ts_alert_status = ts_capture_alert_status();
+    }
+
     rtc_init(rtc_alarm_occuried_callback); // Initialize RTC
 
     ts_init(ts_below_temperature_callback, ts_over_temperature_callback); // Initialize temperature sensor
@@ -313,7 +323,6 @@ int main() {
 
 	led_init();	// Initialize LED controller
 
-	bool resumed_from_hibernate = hibernate_was_resumed();
 	if (resumed_from_hibernate) {
 
     	uint32_t wake_flags = hibernate_get_wakeup_flags();
@@ -346,9 +355,10 @@ int main() {
         } else if (wake_flags & WAKEUP_SOURCE_BUTTON) {
             debug_log("Woke up by button.\n");
             request_startup(ACTION_REASON_BUTTON_CLICK);
-        } else if (wake_flags & WAKEUP_SOURCE_TS) {
+        } else if ((wake_flags & WAKEUP_SOURCE_TS) ||
+                   hibernate_ts_alert_status >= 0) {
             debug_log("Woke up by temperature alert.\n");
-            ts_process_alert();
+            ts_process_captured_alert(hibernate_ts_alert_status);
         } else if (wake_flags & WAKEUP_SOURCE_TIMER) {
             //debug_log("Woke up by pulse timer.\n");
             uint8_t task_time = rpi_off_intermittent_task();

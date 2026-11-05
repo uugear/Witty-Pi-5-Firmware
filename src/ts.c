@@ -25,8 +25,8 @@ gpio_event_callback_t over_callback = NULL;
 // @return The status, -1 if error
 int get_smbus_alert_status() {
     uint8_t received_byte;
-    int ret = i2c_read_blocking(i2c0, SMBUS_ALERT_RESPONSE_ADDRESS, &received_byte, 1, true);
-    if (ret < 0) {
+    int ret = i2c_read_blocking(i2c0, SMBUS_ALERT_RESPONSE_ADDRESS, &received_byte, 1, false);
+    if (ret != 1) {
         return -1;
     }
     uint8_t received_address_7bit = (received_byte >> 1);
@@ -37,18 +37,25 @@ int get_smbus_alert_status() {
 }
 
 
-// Process temperature alert
-void ts_process_alert(void) {
+// Capture the SMBus alert before any TMP112 register access can clear it.
+int ts_capture_alert_status(void) {
     int status = -1;
-    for (int i = 0; status == -1 && i < 5; i ++) {
+    for (int i = 0; status == -1 && i < 5; i++) {
         status = get_smbus_alert_status();
     }
-    if (status == -1) {
+    return status;
+}
+
+
+// Process an alert status captured before sensor initialization or in an IRQ.
+void ts_process_captured_alert(int status) {
+    if (status != ALERT_STATUS_OVER_TEMPERATURE &&
+        status != ALERT_STATUS_BELOW_TEMPERATURE) {
         debug_log("Received alert without status.\n");
-        return; // Ignore alert without smbus response
+        return;
     }
 
-    // Read temperature to clear alert status
+    // Read temperature to log the event and release any remaining alert condition.
     int32_t t = ts_get_temperature_mc();
     int32_t t_low = ts_get_t_low_mc();
     int32_t t_high = ts_get_t_high_mc();
@@ -68,6 +75,12 @@ void ts_process_alert(void) {
     } else {
         debug_log("Unknown alert status: %d\n", status);
     }
+}
+
+
+// Process a temperature alert during normal operation.
+void ts_process_alert(void) {
+    ts_process_captured_alert(ts_capture_alert_status());
 }
 
 

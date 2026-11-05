@@ -16,6 +16,10 @@
 
 #define CONF_LOW_VOLTAGE        "LOW_VOLTAGE"       // Low voltage threshold (x10), 0=disabled
 #define CONF_RECOVERY_VOLTAGE   "RECOVERY_VOLTAGE"  // Voltage (x10) that triggers recovery, 0=disabled
+#define CONF_VOLTAGE_CONFIRM_COUNT "VOLTAGE_CONFIRM_COUNT" // Additional immediate voltage readings required before a power action
+
+#define VOLTAGE_CONFIRM_COUNT_DEFAULT 2u
+#define VOLTAGE_CONFIRM_COUNT_MAX     5u
 
 #define CONF_PS_PRIORITY        "PS_PRIORITY"       // HAT+: power source priority; Mini: actual power source (0=VUSB, 1=VIN)
 

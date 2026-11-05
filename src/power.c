@@ -57,6 +57,70 @@ bool vin_recoverable = false;
 uint8_t action_reason = 0;
 
 
+/**
+ * The first voltage reading has already crossed the threshold. Perform only
+ * the additional readings configured by the user, without waiting for the
+ * next polling cycle. Zero preserves the original immediate behavior.
+ */
+static uint8_t power_voltage_confirm_count(void) {
+    uint8_t count = conf_get(CONF_VOLTAGE_CONFIRM_COUNT);
+    return count <= VOLTAGE_CONFIRM_COUNT_MAX ? count : VOLTAGE_CONFIRM_COUNT_DEFAULT;
+}
+
+
+static bool power_confirm_vin_threshold(uint16_t threshold, bool below) {
+    uint8_t count = power_voltage_confirm_count();
+    for (uint8_t i = 0; i < count; ++i) {
+        uint16_t vin = get_vin_mv();
+        if (below ? vin >= threshold : vin < threshold) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+#if WP5_PRODUCT != PRODUCT_WITTY_PI_5_MINI
+/**
+ * In VUSB-first mode, shutdown is required only if VUSB is unavailable and
+ * VIN cannot provide acceptable power. Recheck both sources on each pass.
+ */
+static bool power_confirm_vusb_first_low(uint16_t vlow) {
+    uint8_t count = power_voltage_confirm_count();
+    for (uint8_t i = 0; i < count; ++i) {
+        uint16_t vusb = get_vusb_mv();
+        if (vusb >= MIN_VUSB_MV) {
+            return false;
+        }
+        uint16_t vin = get_vin_mv();
+        if (vin >= MIN_VIN_MV && (vlow == 0 || vin >= vlow)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+/**
+ * In VIN-first mode, an available VUSB source is a fallback only when VIN
+ * falls below the minimum operating voltage. Preserve that priority rule.
+ */
+static bool power_confirm_vin_first_low(uint16_t vlow) {
+    uint8_t count = power_voltage_confirm_count();
+    for (uint8_t i = 0; i < count; ++i) {
+        uint16_t vin = get_vin_mv();
+        if (vin >= vlow) {
+            return false;
+        }
+        if (vin < MIN_VIN_MV && get_vusb_mv() >= MIN_VUSB_MV) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+
 static uint8_t power_get_valid_source_priority(void) {
     uint8_t priority = conf_get(CONF_PS_PRIORITY);
 
@@ -561,6 +625,10 @@ static int power_source_polling_mini(uint8_t source) {
         power_low_counter++;
 
         if (power_low_counter > MAX_POWER_LOW_COUNTER) {
+            if (!power_confirm_vin_threshold(vlow, true)) {
+                power_low_counter = 0;
+                return POWER_LOW_PENDING;
+            }
             vin_recoverable = true;
             debug_log("Power low: Vin=%dmV, Vlow=%dmV\n", vin, vlow);
             request_shutdown(false, ACTION_REASON_VIN_DROP);
@@ -613,6 +681,10 @@ int power_source_polling(void) {
                 // Vin is lower than MIN_VIN_MV, or lower than Vlow
                 power_low_counter ++;
                 if (power_low_counter > MAX_POWER_LOW_COUNTER) {
+                    if (!power_confirm_vusb_first_low(vlow)) {
+                        power_low_counter = 0;
+                        return POWER_LOW_PENDING;
+                    }
                     vin_recoverable = true;
                     debug_log("Power low: Vusb=%dmV, Vin=%dmV, Vlow=%dmV\n", vusb, vin, vlow);
                     request_shutdown(false, ACTION_REASON_VIN_DROP);
@@ -636,6 +708,10 @@ int power_source_polling(void) {
 				} else {
 				    power_low_counter ++;
 				    if (power_low_counter > MAX_POWER_LOW_COUNTER) {
+                        if (!power_confirm_vin_first_low(vlow)) {
+                            power_low_counter = 0;
+                            return POWER_LOW_PENDING;
+                        }
 				        vin_recoverable = true;
     					debug_log("Power low: Vin=%dmV, Vlow=%dmV\n", vin, vlow);
     					request_shutdown(false, ACTION_REASON_VIN_DROP);
@@ -676,7 +752,7 @@ bool can_vin_turn_on_rpi(void) {
     	uint16_t vrec = conf_get(CONF_RECOVERY_VOLTAGE) * 100;
     	if (vrec != 0) {
     		uint16_t vin = get_vin_mv();
-    		if (vin >= vrec) {
+            if (vin >= vrec && power_confirm_vin_threshold(vrec, false)) {
     			debug_log("Vin=%dmV, Vrec=%dmV\n", vin, vrec);
     			return true;
     		}
@@ -697,7 +773,7 @@ bool can_vin_turn_off_rpi(void) {
 		uint16_t vlow = conf_get(CONF_LOW_VOLTAGE) * 100;
 		if (vlow != 0) {
 			uint16_t vin = get_vin_mv();
-			if (vin < vlow) {
+			if (vin < vlow && power_confirm_vin_threshold(vlow, true)) {
 				debug_log("Vin=%dmV, Vlow=%dmV\n", vin, vlow);
 				return true;
 			}

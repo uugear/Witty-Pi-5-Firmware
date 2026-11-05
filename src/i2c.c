@@ -701,6 +701,8 @@ uint8_t get_config_register(uint8_t index) {
             return conf_get(CONF_LOW_VOLTAGE);
         case I2C_CONF_RECOVERY_VOLTAGE:
             return conf_get(CONF_RECOVERY_VOLTAGE);
+        case I2C_CONF_VOLTAGE_CONFIRM_COUNT:
+            return conf_get(CONF_VOLTAGE_CONFIRM_COUNT);
 
         case I2C_CONF_PS_PRIORITY:
             return conf_get(CONF_PS_PRIORITY);
@@ -825,6 +827,13 @@ void set_config_register(uint8_t index, uint8_t value) {
         case I2C_CONF_RECOVERY_VOLTAGE:
             conf_set(CONF_RECOVERY_VOLTAGE, value);
 			break;
+        case I2C_CONF_VOLTAGE_CONFIRM_COUNT:
+            if (value <= VOLTAGE_CONFIRM_COUNT_MAX) {
+                conf_set(CONF_VOLTAGE_CONFIRM_COUNT, value);
+            } else {
+                debug_log("Invalid VOLTAGE_CONFIRM_COUNT ignored: %u\n", value);
+            }
+            break;
 
 	    case I2C_CONF_PS_PRIORITY:
             if (value == POWER_SOURCE_PRIORITY_VUSB || value == POWER_SOURCE_PRIORITY_VIN) {

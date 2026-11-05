@@ -38,6 +38,7 @@ conf_obj_t default_config = {
 
         {.key = CONF_LOW_VOLTAGE, .value = 0},
         {.key = CONF_RECOVERY_VOLTAGE, .value = 0},
+        {.key = CONF_VOLTAGE_CONFIRM_COUNT, .value = VOLTAGE_CONFIRM_COUNT_DEFAULT},
         
         {.key = CONF_PS_PRIORITY, .value = 0},
 
@@ -82,7 +83,7 @@ conf_obj_t default_config = {
         
         {.key = CONF_VIN_HOT_STANDBY, .value = 0},
     },
-    .count = 40
+    .count = 41
 };
 
 static bool dirty = false;
@@ -161,6 +162,10 @@ static bool conf_sanitize(conf_obj_t *obj) {
     );
     changed |= conf_sanitize_bool_value(obj, CONF_PS_PRIORITY, 0);
     changed |= conf_sanitize_bool_value(obj, CONF_VIN_HOT_STANDBY, 0);
+    changed |= conf_sanitize_range_value(
+        obj, CONF_VOLTAGE_CONFIRM_COUNT, 0,
+        VOLTAGE_CONFIRM_COUNT_MAX, VOLTAGE_CONFIRM_COUNT_DEFAULT
+    );
 
     return changed;
 }

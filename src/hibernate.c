@@ -18,6 +18,7 @@
 #include "fatfs_disk.h"
 #include "usb_msc_device.h"
 #include "power.h"
+#include "dst.h"
 
 // POWMAN pwrup slots used by WP5.
 #define SRC_BUTTON      0
@@ -29,9 +30,13 @@
 #define HIBERNATE_CONTEXT_MAGIC_MASK    0xFFFF0000
 #define HIBERNATE_CONTEXT_RTC_ALARM_TYPE_MASK   0x000000FFu
 #define HIBERNATE_CONTEXT_FLAG_VIN_RECOVERABLE  0x00000100u
+#define HIBERNATE_CONTEXT_FLAG_DST_WAKEUP       0x00000200u
 
 // Avoid a zero-delay POWMAN alarm loop if the configuration is invalid.
 #define HIBERNATE_MIN_PULSE_INTERVAL_S  1u
+/* Allow for USB disconnect, logging, and POWMAN state transition after the
+ * timer has been armed. A timer firing before sleep can lose its wake event. */
+#define HIBERNATE_DST_MIN_ARM_MS 2000u
 
 #define HIBERNATE_I2C_SDA_GPIO  6
 #define HIBERNATE_I2C_SCL_GPIO  7
@@ -43,16 +48,20 @@ static bool resumed_from_hibernate = false;
 static uint32_t hibernate_block_flags = HIBERNATE_BLOCK_NONE;
 static absolute_time_t hibernate_usb_grace_until;
 static bool forced_entry_requested = false;
+static bool resumed_dst_wakeup = false;
+static bool next_timer_is_dst = false;
 
 bool hibernating = false;
 int wokeup_by = WOKEUP_BY_NONE;
 
-static uint32_t hibernate_make_context(uint8_t rtc_alarm_type, bool vin_recoverable) {
+static uint32_t hibernate_make_context(uint8_t rtc_alarm_type, bool vin_recoverable,
+                                       bool dst_timer) {
     uint32_t context = HIBERNATE_CONTEXT_MAGIC |
                        ((uint32_t)rtc_alarm_type & HIBERNATE_CONTEXT_RTC_ALARM_TYPE_MASK);
     if (vin_recoverable) {
         context |= HIBERNATE_CONTEXT_FLAG_VIN_RECOVERABLE;
     }
+    if (dst_timer) context |= HIBERNATE_CONTEXT_FLAG_DST_WAKEUP;
     return context;
 }
 
@@ -170,12 +179,15 @@ void hibernate_init(void) {
     // Cache the last hardware wake source before configuring a new sleep.
     if (resumed_from_hibernate) {
         last_wakeup_flags = hibernate_decode_last_swcore_pwrup();
+        resumed_dst_wakeup = (context & HIBERNATE_CONTEXT_FLAG_DST_WAKEUP) != 0 &&
+                             (last_wakeup_flags & WAKEUP_SOURCE_TIMER) != 0;
         uint8_t rtc_alarm_type = hibernate_context_get_rtc_alarm_type(context);
         rtc_restore_alarm_type_after_hibernate(rtc_alarm_type);
         bool vin_recoverable = hibernate_context_get_vin_recoverable(context);
         power_restore_vin_recoverable_after_hibernate(vin_recoverable);
     } else {
         last_wakeup_flags = WAKEUP_SOURCE_RESET;
+        resumed_dst_wakeup = false;
         rtc_restore_alarm_type_after_hibernate(ALARM_TYPE_NONE);
         power_restore_vin_recoverable_after_hibernate(false);
     }
@@ -271,8 +283,23 @@ static void hibernate_configure_timer_wakeup(void) {
         interval_s = HIBERNATE_MIN_PULSE_INTERVAL_S;
     }
 
+    uint64_t interval_ms = (uint64_t)interval_s * 1000u;
+    uint64_t dst_ms;
+    next_timer_is_dst = false;
+    if (dst_get_next_wakeup_ms(&dst_ms) && dst_ms <= interval_ms) {
+        /* A separate marker disambiguates the existing POWMAN timer source.
+         * Use a safe minimum delay if the event is already overdue or too
+         * close to survive the pre-hibernation cleanup. */
+        interval_ms = dst_ms < HIBERNATE_DST_MIN_ARM_MS
+            ? HIBERNATE_DST_MIN_ARM_MS : dst_ms;
+        next_timer_is_dst = true;
+        debug_log("DST: arm POWMAN wake in %llu ms (remaining %llu ms).\n",
+                  (unsigned long long)interval_ms,
+                  (unsigned long long)dst_ms);
+    }
+    if (interval_ms < 100u) interval_ms = 100u;
     uint64_t now_ms = powman_timer_get_ms();
-    powman_enable_alarm_wakeup_at_ms(now_ms + (uint64_t)interval_s * 1000u);
+    powman_enable_alarm_wakeup_at_ms(now_ms + interval_ms);
 }
 
 int hibernate_enter(void) {
@@ -296,7 +323,7 @@ int hibernate_enter(void) {
     
     uint8_t rtc_alarm_type = rtc_get_alarm_type();
     bool vin_recoverable = power_is_vin_recoverable();
-    powman_hw->scratch[HIBERNATE_SCRATCH_CONTEXT] = hibernate_make_context(rtc_alarm_type, vin_recoverable);
+    powman_hw->scratch[HIBERNATE_SCRATCH_CONTEXT] = hibernate_make_context(rtc_alarm_type, vin_recoverable, next_timer_is_dst);
 
     bool valid_state = powman_configure_wakeup_state(off_state, on_state);
     if (!valid_state) {
@@ -330,6 +357,10 @@ int hibernate_enter(void) {
 
 bool hibernate_was_resumed(void) {
     return resumed_from_hibernate;
+}
+
+bool hibernate_was_dst_timer_wakeup(void) {
+    return resumed_from_hibernate && resumed_dst_wakeup;
 }
 
 uint32_t hibernate_get_block_flags(void) {

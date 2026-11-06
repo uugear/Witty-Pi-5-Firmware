@@ -10,6 +10,7 @@
 #include "fatfs_disk.h"
 #include "conf.h"
 #include "util.h"
+#include "dst.h"
 
 
 #define WPI_SCRIPT_STATE_ON		0
@@ -380,6 +381,13 @@ bool find_next_actions_from_skd(const char *path, uint64_t cur_time, bool startu
     UINT bytes_read;
     bool found_startup = false;
     bool found_shutdown = false;
+    int64_t standard_now;
+    DstRule rule;
+    if (!dst_get_standard_now(&standard_now) || !dst_get_rule(&rule)) return false;
+    int64_t previous_nominal = -1;
+    int64_t previous_standard = -1;
+    int64_t found_startup_standard = -1;
+    int64_t found_shutdown_standard = -1;
     
     fr = f_open(&file, path, FA_READ);
     if (fr != FR_OK) {
@@ -418,25 +426,33 @@ bool find_next_actions_from_skd(const char *path, uint64_t cur_time, bool startu
             line++;
         }
         
-        // Skip if timestamp is in the past
-        if (timestamp <= cur_time) {
-            continue;
-        }
+        /* Convert the ordered source list onto a continuous timeline.
+         * The spring gap shifts nonexistent times forward and preserves
+         * action ordering and the duration to a following action. */
+        int64_t resolved_standard = dst_resolve_ordered_action(
+            &rule, (int64_t)timestamp, previous_nominal, previous_standard);
+        previous_nominal = (int64_t)timestamp;
+        previous_standard = resolved_standard;
+        if (resolved_standard <= standard_now) continue;
+        uint64_t resolved_local = (uint64_t)dst_standard_to_local(
+            &rule, resolved_standard);
         
         if (startup_first) {
             // Looking for startup first, then shutdown
             if (!found_startup && is_up) {
                 if (startup != NULL) {
                     startup->is_up = true;
-                    startup->time = timestamp;
+                    startup->time = resolved_local;
                 }
                 found_startup = true;
-            } else if (found_startup && !is_up && timestamp > startup->time) {
+                found_startup_standard = resolved_standard;
+            } else if (found_startup && !is_up && resolved_standard > found_startup_standard) {
                 if (shutdown != NULL) {
                     shutdown->is_up = false;
-                    shutdown->time = timestamp;
+                    shutdown->time = resolved_local;
                 }
                 found_shutdown = true;
+                found_shutdown_standard = resolved_standard;
                 break;
             }
         } else {
@@ -444,15 +460,17 @@ bool find_next_actions_from_skd(const char *path, uint64_t cur_time, bool startu
             if (!found_shutdown && !is_up) {
                 if (shutdown != NULL) {
                     shutdown->is_up = false;
-                    shutdown->time = timestamp;
+                    shutdown->time = resolved_local;
                 }
                 found_shutdown = true;
-            } else if (found_shutdown && is_up && timestamp > shutdown->time) {
+                found_shutdown_standard = resolved_standard;
+            } else if (found_shutdown && is_up && resolved_standard > found_shutdown_standard) {
                 if (startup != NULL) {
                     startup->is_up = true;
-                    startup->time = timestamp;
+                    startup->time = resolved_local;
                 }
                 found_startup = true;
+                found_startup_standard = resolved_standard;
                 break;
             }
         }
@@ -462,6 +480,7 @@ bool find_next_actions_from_skd(const char *path, uint64_t cur_time, bool startu
     
     return (found_startup && found_shutdown);
 }
+
 
 
 /**
@@ -796,7 +815,6 @@ bool load_script(bool run) {
     
     bool success = true;
     if (startup_first) {
-		adjust_action_time_for_dst(&startup.time);
         if (!set_alarm_for_action(&startup)) {
             debug_log("Can not set alarm for startup action.\n");
             success = false;
@@ -806,7 +824,6 @@ bool load_script(bool run) {
             success = false;
         }
     } else {
-		adjust_action_time_for_dst(&shutdown.time);
         if (!set_alarm_for_action(&shutdown)) {
             debug_log("Can not set alarm for shutdown action.\n");
             success = false;

@@ -110,6 +110,9 @@ uint32_t hibernate_get_active_gpio_flags(void);
  */
 bool hibernate_was_resumed(void);
 
+/** True when this timer event was specifically armed for a DST transition. */
+bool hibernate_was_dst_timer_wakeup(void);
+
 /**
  * Get the flags for hibernation blocking
  */

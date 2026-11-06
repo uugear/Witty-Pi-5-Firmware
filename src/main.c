@@ -27,6 +27,7 @@
 #include "bootsel_button.h"
 #include "hibernate.h"
 #include "usb_msc_device.h"
+#include "dst.h"
 
 
 #define VOLTAGE_CHECK_INTERVAL_US	1000000
@@ -307,11 +308,11 @@ int main() {
         ((hibernate_get_wakeup_flags() & WAKEUP_SOURCE_TS) ||
          !gpio_get(GPIO_TS_INT))) {
         // TMP112 register reads during ts_init() clear pending alerts.
-        // Capture an alert even if it coincides with another wake source.
         hibernate_ts_alert_status = ts_capture_alert_status();
     }
 
     rtc_init(rtc_alarm_occuried_callback); // Initialize RTC
+    dst_register_config_callbacks();
 
     ts_init(ts_below_temperature_callback, ts_over_temperature_callback); // Initialize temperature sensor
 
@@ -323,6 +324,24 @@ int main() {
 
 	led_init();	// Initialize LED controller
 
+    /* A timer marked for DST must be distinguished from an ordinary pulse.
+     * Other wake sources also perform a recovery check for a missed transition.
+     * Regular pulse wakeups do not recalculate DST rules. */
+    uint32_t initial_wake_flags = resumed_from_hibernate
+        ? hibernate_get_wakeup_flags() : WAKEUP_SOURCE_RESET;
+    bool dst_timer_wakeup = hibernate_was_dst_timer_wakeup();
+    if (dst_timer_wakeup) {
+        debug_log("DST: POWMAN timer wake (flags=0x%08lx).\n",
+                  (unsigned long)initial_wake_flags);
+    }
+    bool dst_changed = false;
+    if (!resumed_from_hibernate || dst_timer_wakeup ||
+        (initial_wake_flags & (WAKEUP_SOURCE_BUTTON | WAKEUP_SOURCE_RTC |
+                               WAKEUP_SOURCE_TS))) {
+        dst_changed = dst_process_due_transition();
+    }
+    bool dst_action_dispatched = false;
+
 	if (resumed_from_hibernate) {
 
     	uint32_t wake_flags = hibernate_get_wakeup_flags();
@@ -330,26 +349,22 @@ int main() {
         bool rtc_alarm_armed = rtc_get_alarm_type() != ALARM_TYPE_NONE;
 
         /*
-         * A disabled alarm may still set AF. Do not treat a stale flag or
-         * wake-source latch as a scheduled startup/shutdown action, and do
-         * not let it mask a simultaneous button/temperature/timer wake.
+         * A pending RTC alarm must be handled even when another wake source
+         * woke the RP2350 first. Otherwise the alarm may remain unprocessed.
          */
         if (!rtc_alarm_armed && rtc_alarm_pending) {
             rtc_clear_alarm_flag();
             rtc_alarm_pending = false;
         }
-
-        /*
-         * A pending armed RTC alarm must be handled even when another wake
-         * source woke the RP2350 first.
-         */
         if (rtc_alarm_armed && ((wake_flags & WAKEUP_SOURCE_RTC) || rtc_alarm_pending)) {
-            if (wake_flags & WAKEUP_SOURCE_RTC) {
-                debug_log("Woke up by RTC alarm.\n");
+            if (dst_configured_alarm_ready(false)) {
+                debug_log("RTC scheduled action is due.\n");
+                rtc_alarm_occuried_callback();
+                dst_action_dispatched = true;
+                schedule_mark_processed_this_boot();
             } else {
-                debug_log("RTC alarm occurred during another wake event.\n");
+                debug_log("Ignore RTC alarm that is not due on the continuous timeline.\n");
             }
-            rtc_alarm_occuried_callback();
             rtc_clear_alarm_flag();
 
         } else if (wake_flags & WAKEUP_SOURCE_BUTTON) {
@@ -359,7 +374,7 @@ int main() {
                    hibernate_ts_alert_status >= 0) {
             debug_log("Woke up by temperature alert.\n");
             ts_process_captured_alert(hibernate_ts_alert_status);
-        } else if (wake_flags & WAKEUP_SOURCE_TIMER) {
+        } else if ((wake_flags & WAKEUP_SOURCE_TIMER) && !dst_timer_wakeup) {
             //debug_log("Woke up by pulse timer.\n");
             uint8_t task_time = rpi_off_intermittent_task();
             sleep_ms(task_time);
@@ -374,7 +389,8 @@ int main() {
                 hibernate_skip_usb_grace();
                 int rc = hibernate_enter();
                 if (rc != PICO_OK) {
-                    debug_log("Failed to re-enter hibernation after pulse wake: %d\n", rc);
+                    debug_log("Failed to re-enter hibernation after pulse wake: %d (block_flags=0x%08lx)\n",
+                              rc, (unsigned long)hibernate_get_block_flags());
                 }
             }
         }
@@ -387,6 +403,34 @@ int main() {
         rtc_clear_alarm_flag();
     }
     
+    if (dst_changed) {
+        if (!dst_action_dispatched && dst_configured_alarm_ready(true)) {
+            debug_log("DST transition reached a scheduled action.\n");
+            rtc_alarm_occuried_callback();
+            dst_action_dispatched = true;
+            schedule_mark_processed_this_boot();
+        }
+        if (!dst_action_dispatched) {
+            if (!load_script(true)) {
+                load_and_schedule_alarm(current_rpi_state == STATE_OFF ||
+                                        current_rpi_state == STATE_STOPPING);
+            }
+        }
+        /* Complete deferred alarm programming and POWMAN synchronization
+         * before the DST timer wake can return directly to hibernation. */
+        sleep_ms(120);
+        rtc_process_pending_alarm_conf();
+    }
+
+    if (dst_timer_wakeup && !dst_action_dispatched &&
+        current_rpi_state == STATE_OFF) {
+        hibernate_skip_usb_grace();
+        int rc = hibernate_enter();
+        if (rc != PICO_OK) {
+            debug_log("Failed to re-enter hibernation after DST wake: %d\n", rc);
+        }
+    }
+
     board_init();
     tud_init(BOARD_TUD_RHPORT);
 
@@ -408,6 +452,9 @@ int main() {
         }
     }
 
+    // Arm a callback for the next DST event while the MCU stays awake.
+    dst_schedule_active_check();
+
     // Keep checking voltage
     add_alarm_in_us(VOLTAGE_CHECK_INTERVAL_US, voltage_check_callback, NULL, true);
 
@@ -417,6 +464,31 @@ int main() {
         usb_msc_process_task();
         i2c_process_pending_admin_command();  // Process deferred admin commands (FS ops outside I2C IRQ)
         rtc_process_pending_alarm_conf();  // Process deferred alarm configurations
+        if (rtc_take_gpio_alarm()) {
+            bool changed = dst_process_due_transition();
+            if (dst_configured_alarm_ready(false)) {
+                rtc_alarm_occuried_callback();
+            } else {
+                if (!load_script(true)) {
+                    load_and_schedule_alarm(current_rpi_state == STATE_OFF ||
+                                            current_rpi_state == STATE_STOPPING);
+                }
+            }
+            rtc_clear_alarm_flag();
+            if (changed) dst_schedule_active_check();
+        }
+        if (dst_active_check_due()) {
+            bool changed = dst_process_due_transition();
+            if (changed) {
+                if (dst_configured_alarm_ready(true)) {
+                    rtc_alarm_occuried_callback();
+                } else if (!load_script(true)) {
+                    load_and_schedule_alarm(current_rpi_state == STATE_OFF ||
+                                            current_rpi_state == STATE_STOPPING);
+                }
+            }
+            dst_schedule_active_check();
+        }
         process_log_task();
         process_conf_task();
 		if (!factory_reset_pending && conf_get(CONF_BOOTSEL_FTY_RST)) {

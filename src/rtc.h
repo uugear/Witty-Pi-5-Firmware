@@ -119,6 +119,9 @@ bool rtc_set_timestamp(int64_t timestamp);
  */
 void rtc_clear_alarm_flag(void);
 
+/** Consume the IRQ event without touching I2C inside interrupt context. */
+bool rtc_take_gpio_alarm(void);
+
 
 /**
  * Set RTC alarm
@@ -154,16 +157,6 @@ bool can_cur_time_turn_off_rpi(void);
  * @return true if newly applied, otherwise false
  */
 bool apply_dst_if_needed(void);
-
-
-/**
- * Adjust given startup/shutdown timestamp for incoming DST switching
- *
- * @param p_action_ts The pointer to action timestamp
- *
- * @return true if adjustment has been made, otherwise false
- */
-bool adjust_action_time_for_dst(uint64_t * p_action_ts);
 
 
 /**

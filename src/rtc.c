@@ -11,6 +11,7 @@
 #include "conf.h"
 #include "util.h"
 #include "script.h"
+#include "dst.h"
 
 
 #define SYNC_TIME_INTERVAL_US      30000000
@@ -74,6 +75,7 @@
 
 
 static uint8_t alarm_type = ALARM_TYPE_NONE;
+static volatile bool rtc_gpio_alarm_seen = false;
 
 gpio_event_callback_t rtc_alarm_callback = NULL;
 
@@ -232,10 +234,14 @@ void timestamp_to_datetime(int64_t timestamp, DateTime *dt) {
 
 // Callback when RTC alarm occurs
 void rtc_alarm_occurred(void) {
-    if (rtc_alarm_callback) {
-        rtc_alarm_callback();
-    }
-    rtc_clear_alarm_flag();
+    /* Defer all I2C operations and action dispatch out of the GPIO IRQ. */
+    rtc_gpio_alarm_seen = true;
+}
+
+bool rtc_take_gpio_alarm(void) {
+    bool seen = rtc_gpio_alarm_seen;
+    rtc_gpio_alarm_seen = false;
+    return seen;
 }
 
 
@@ -260,11 +266,12 @@ static void rtc_apply_alarm1_conf(void) {
 		rtc_set_alarm(0, 0, 0, true);
 	} else {
 		DateTime dt;
-		rtc_get_scheduled_time(date, hour, minute, second, &dt);
-		int64_t ts = get_total_seconds(&dt);
-		if (adjust_action_time_for_dst(&ts)) {
-			timestamp_to_datetime(ts, &dt);
-		}
+        if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
+            debug_log("Cannot resolve next configured RTC alarm date.\n");
+            return;
+        }
+        int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
+        timestamp_to_datetime(ts, &dt);
 		debug_log("Set Alarm1 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
 		rtc_set_alarm(dt.day, dt.hour, dt.min, true);
 	}
@@ -280,11 +287,12 @@ static void rtc_apply_alarm2_conf(void) {
 		rtc_set_alarm(0, 0, 0, false);
 	} else {
 		DateTime dt;
-		rtc_get_scheduled_time(date, hour, minute, second, &dt);
-		int64_t ts = get_total_seconds(&dt);
-		if (adjust_action_time_for_dst(&ts)) {
-			timestamp_to_datetime(ts, &dt);
-		}
+        if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
+            debug_log("Cannot resolve next configured RTC alarm date.\n");
+            return;
+        }
+        int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
+        timestamp_to_datetime(ts, &dt);
 		debug_log("Set Alarm2 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
 		rtc_set_alarm(dt.day, dt.hour, dt.min, false);
 	}
@@ -530,65 +538,37 @@ static bool rtc_set_alarm_interrupt_enabled(bool enabled) {
     return set_virtual_register(I2C_VREG_RX8025_CONTROL_REGISTER, control) == 1;
 }
 
-
-/**
- * Clear the alarm flag without changing other RTC status flags.
- * Unlike the virtual-register getter, this read reports I2C errors.
- */
 static bool rtc_clear_alarm_flag_checked(void) {
     uint8_t status;
-    if (i2c_read_from_slave(RX8025_ADDRESS, RX8025_RTC_FLAG, &status, 1) != 1) {
+    if (i2c_read_from_slave(RX8025_ADDRESS, RX8025_RTC_FLAG, &status, 1) != 1)
         return false;
-    }
     status &= (uint8_t)~BIT_VALUE(AF);
     return i2c_write_to_slave(RX8025_ADDRESS, RX8025_RTC_FLAG, &status, 1) == 1;
 }
 
-
-/**
- * Clear RTC alarm flag (so alarm can occur again).
- */
 void rtc_clear_alarm_flag(void) {
     (void)rtc_clear_alarm_flag_checked();
 }
 
-
-/**
- * Set or cancel the active RTC alarm.
- *
- * The RTC uses one shared alarm comparator for startup and shutdown.
- * Cancelling an inactive type must not modify the active comparator.
- * Disable AIE before changing comparison fields, then clear any stale
- * AF and re-enable AIE only after the new alarm is fully programmed.
- *
- * @return true if the requested update succeeded
- */
 static bool rtc_update_alarm(int8_t day, int8_t hour, int8_t min, bool startup) {
     const uint8_t requested_type = startup ? ALARM_TYPE_STARTUP : ALARM_TYPE_SHUTDOWN;
     const bool cancel = day == 0 && hour == 0 && min == 0;
 
-    if (cancel && alarm_type != ALARM_TYPE_NONE && alarm_type != requested_type) {
+    if (cancel && alarm_type != ALARM_TYPE_NONE && alarm_type != requested_type)
         return true;
-    }
 
-    // Reject invalid alarms, including a configuration matching every minute.
     if (!cancel &&
         (day < -1 || day > 31 || hour < -1 || hour > 23 ||
          min < -1 || min > 59 ||
-         (day == -1 && hour == -1 && min == -1) ||
-         day == 0)) {
+         (day == -1 && hour == -1 && min == -1) || day == 0)) {
         debug_log("Reject invalid RTC alarm parameters.\n");
         return false;
     }
-
     if (!rtc_set_alarm_interrupt_enabled(false)) {
         debug_log("Failed to disable RTC alarm interrupt.\n");
         return false;
     }
-
-    // From this point the previously armed alarm is no longer active.
     alarm_type = ALARM_TYPE_NONE;
-
     if (cancel) {
         if (!rtc_clear_alarm_flag_checked()) {
             debug_log("Failed to clear cancelled RTC alarm flag.\n");
@@ -596,7 +576,6 @@ static bool rtc_update_alarm(int8_t day, int8_t hour, int8_t min, bool startup) 
         }
         return true;
     }
-
     if (set_virtual_register(I2C_VREG_RX8025_DAY_ALARM,
                              day >= 0 ? dec_to_bcd(day) : AE_MASK) != 1 ||
         set_virtual_register(I2C_VREG_RX8025_HOUR_ALARM,
@@ -605,25 +584,14 @@ static bool rtc_update_alarm(int8_t day, int8_t hour, int8_t min, bool startup) 
                              min >= 0 ? dec_to_bcd(min) : AE_MASK) != 1 ||
         !rtc_clear_alarm_flag_checked() ||
         !rtc_set_alarm_interrupt_enabled(true)) {
-        // A partial configuration must not be treated as an armed alarm.
         rtc_set_alarm_interrupt_enabled(false);
         debug_log("Failed to program RTC alarm.\n");
         return false;
     }
-
     alarm_type = requested_type;
     return true;
 }
 
-
-/**
- * Set RTC alarm.
- *
- * @param day The day of alarm, use negative value to skip
- * @param hour The hour of alarm, use negative value to skip
- * @param min The minute of alarm, use negative value to skip
- * @param startup Whether the alarm is for startup
- */
 void rtc_set_alarm(int8_t day, int8_t hour, int8_t min, bool startup) {
     (void)rtc_update_alarm(day, hour, min, startup);
 }
@@ -653,7 +621,7 @@ bool rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, Dat
     }
 
     DateTime now;
-    rtc_get_time(&now);
+    if (!rtc_get_time(&now)) return false;
 
     DateTime candidate = now;
     candidate.day = day;
@@ -661,15 +629,17 @@ bool rtc_get_scheduled_time(int8_t day, int8_t hour, int8_t min, int8_t sec, Dat
     candidate.min = min;
     candidate.sec = sec;
 
-    int64_t now_ts = get_total_seconds(&now);
+    int64_t now_std;
+    if (!dst_get_standard_now(&now_std)) return false;
     while (
         day > get_days_in_month(candidate.year, candidate.month) ||
-        get_total_seconds(&candidate) <= now_ts
+        dst_action_to_standard(get_total_seconds(&candidate)) <= now_std
     ) {
         candidate.month++;
         if (candidate.month > 12) {
             candidate.month = 1;
             candidate.year++;
+            if (candidate.year > 2099) return false;
         }
         candidate.day = day;
         candidate.hour = hour;
@@ -728,208 +698,11 @@ bool can_cur_time_turn_off_rpi(void) {
 
 
 /**
- * Convert the specific weekday in the x week in y month to DateTime
- * 
- * @param year Year (2000~2099)
- * @param month Month (1~12)
- * @param week Week (1~5, 0 means the last week)
- * @param wday Weekday (0~6, 0=Sunday)
- * @param hour Hour (0~23)
- * @param min Minute (0~59)
- * @param dt Pointer to DateTime object
- * @return true for succesful convertion, otherwise false
- */
-bool convert_date(int16_t year, uint8_t month, uint8_t week, uint8_t wday, uint8_t hour, uint8_t min, DateTime *dt) {
-    if (!dt || month < 1 || month > 12 || week > 5 || year < 2000 || year > 2099 || hour > 23 || min > 59) {
-        return false;
-    }
-    
-    // Calculate the weekday for the first day in the month
-    // Use Zeller formula: h = (q + 13*(m+1)/5 + K + K/4 + J/4 + 5*J) % 7
-    int m = month;
-    int y = year;
-    if (m < 3) {
-        m += 12;
-        y -= 1;
-    }
-    int K = y % 100;
-    int J = y / 100;
-    int h = (1 + 13*(m+1)/5 + K + K/4 + J/4 + 5*J) % 7;
-    int first_day_of_month = (h + 6) % 7;
-    
-    int target_day = 1 + (wday + 7 - first_day_of_month) % 7;
-    
-    int days = get_days_in_month(year, month);
-    
-    if (week == 0) {    // For the last week (week=0)
-        int last_day = days;
-        int last_day_wday = (first_day_of_month + days - 1) % 7;
-        target_day = last_day - ((last_day_wday - wday + 7) % 7);
-    } else {            // For non-last week
-        target_day += (week - 1) * 7;
-        if (target_day > days) {
-            return false;
-        }
-    }
-    
-    dt->year = year;
-    dt->month = month;
-    dt->day = target_day;
-    dt->hour = hour;
-    dt->min = min;
-    dt->sec = 0;
-    dt->wday = wday;
-    
-    return true;
-}
-
-
-/**
- * Load DST configuration
- *
- * @param offset Pointer to DST offset (in minute), 0 if DST is disabled
- * @param begin_ts Pointer to DST begin timestamp
- * @param end_ts Pointer to DST end timestamp
- * @param north_hemisphere Pointer to boolean variable, true for north hemisphere
- *
- * @return -1 if something goes wrong, otherwise return the current timestamp
- */
-int64_t load_dst_configuration(uint8_t * p_offset, int64_t * p_begin_ts, int64_t * p_end_ts, bool * p_north_hemisphere) {
-	if (!p_offset || !p_begin_ts || !p_end_ts || !p_north_hemisphere) {
-		return -1;
-	}
-	DateTime cur_dt;
-    bool valid = rtc_get_time(&cur_dt);
-    if (valid) {
-        int64_t cur_ts = get_total_seconds(&cur_dt);
-        
-        *p_offset = conf_get(CONF_DST_OFFSET);
-        uint8_t mode = ((*p_offset & 0x80) >> 7);
-        *p_offset &= 0x7F;
-        
-        uint8_t begin_month = bcd_to_dec(conf_get(CONF_DST_BEGIN_MON));
-        uint8_t begin_day = bcd_to_dec(conf_get(CONF_DST_BEGIN_DAY));
-        uint8_t begin_hour = bcd_to_dec(conf_get(CONF_DST_BEGIN_HOUR));
-        uint8_t begin_min = bcd_to_dec(conf_get(CONF_DST_BEGIN_MIN));
-        
-        uint8_t end_month = bcd_to_dec(conf_get(CONF_DST_END_MON));
-        uint8_t end_day = bcd_to_dec(conf_get(CONF_DST_END_DAY));
-        uint8_t end_hour = bcd_to_dec(conf_get(CONF_DST_END_HOUR));
-        uint8_t end_min = bcd_to_dec(conf_get(CONF_DST_END_MIN));
-        
-        DateTime begin_dt, end_dt;
-        if (mode == 0) { // Mode 0: specify a weekday in the nth week of the month
-            uint8_t begin_week = begin_day / 10;
-            uint8_t begin_wday = begin_day % 10;
-            if (!convert_date(cur_dt.year, begin_month, begin_week, begin_wday, begin_hour, begin_min, &begin_dt)) {
-                return -1;
-            }
-            uint8_t end_week = end_day / 10;
-            uint8_t end_wday = end_day % 10;
-            if (!convert_date(cur_dt.year, end_month, end_week, end_wday, end_hour, end_min, &end_dt)) {
-                return -1;
-            }
-        } else {	// Mode 1: specify a date in the month
-            begin_dt.year = cur_dt.year;
-            begin_dt.month = begin_month;
-            begin_dt.day = begin_day;
-            begin_dt.hour = begin_hour;
-            begin_dt.min = begin_min;
-            begin_dt.sec = 0;
-            
-            end_dt.year = cur_dt.year;
-            end_dt.month = end_month;
-            end_dt.day = end_day;
-            end_dt.hour = end_hour;
-            end_dt.min = end_min;
-            end_dt.sec = 0;
-        }
-        *p_begin_ts = get_total_seconds(&begin_dt);
-        *p_end_ts = get_total_seconds(&end_dt);
-		
-		*p_north_hemisphere = (end_month > begin_month);
-		
-		return cur_ts;
-	}
-	return -1;
-}
-
-
-/**
- * Apply daylight-saving time (DST) if needed
- *
- * @return true if newly applied, otherwise false
+ * Process a DST transition only after the continuous standard timeline
+ * reaches its transition timestamp. This never repeats the autumn rollback.
  */
 bool apply_dst_if_needed(void) {
-	uint8_t offset;
-	int64_t begin_ts, end_ts;
-	bool north_hemisphere;
-	int64_t cur_ts = load_dst_configuration(&offset, &begin_ts, &end_ts, &north_hemisphere);
-	if (cur_ts != -1 && offset != 0) {
-		bool dst_applied = (conf_get(CONF_DST_APPLIED) > 0);
-        bool dst_required = false;
-        if (north_hemisphere) {
-            dst_required = (cur_ts >= begin_ts && cur_ts < end_ts);
-        } else {
-            dst_required = (cur_ts < end_ts || cur_ts >= begin_ts);
-        }
-        if (dst_required) {
-            if (!dst_applied) {
-                // Begin DST: set clocks forward
-				rtc_set_timestamp(cur_ts + offset);
-				conf_set(CONF_DST_APPLIED, 1);
-				conf_sync();
-                return true;
-            }
-        } else {
-            if (dst_applied) {
-                // End DST: set clocks backward
-				rtc_set_timestamp(cur_ts - offset);
-				conf_set(CONF_DST_APPLIED, 0);
-				conf_sync();
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-
-/**
- * Adjust given startup/shutdown timestamp for incoming DST switching
- *
- * @param p_action_ts The pointer to action timestamp
- * @return true if adjustment has been made, otherwise false
- */
-bool adjust_action_time_for_dst(uint64_t * p_action_ts) {
-	if (!p_action_ts) {
-		return false;
-	}
-	uint8_t offset;
-	int64_t begin_ts, end_ts;
-	bool north_hemisphere;
-	int64_t cur_ts = load_dst_configuration(&offset, &begin_ts, &end_ts, &north_hemisphere);
-	if (cur_ts != -1 && offset != 0 && cur_ts < *p_action_ts) {
-		bool dst_applied = (conf_get(CONF_DST_APPLIED) > 0);
-        bool dst_required = false;
-        if (north_hemisphere) {
-            dst_required = (*p_action_ts >= begin_ts && *p_action_ts < end_ts);
-        } else {
-            dst_required = (*p_action_ts < end_ts || *p_action_ts >= begin_ts);
-        }
-		if (dst_required) {
-			if (!dst_applied) {
-				*p_action_ts += offset;
-				return true;
-			}
-		} else {
-			if (dst_applied) {
-				*p_action_ts -= offset;
-				return true;
-			}
-		}
-	}
-	return false;
+    return dst_process_due_transition();
 }
 
 
@@ -957,23 +730,11 @@ bool load_and_schedule_alarm(bool startup) {
         return false;
     }
 
-    int64_t scheduled_ts = get_total_seconds(&dt);
-    if (cur_ts >= scheduled_ts) {
-        return false;
-    }
-
-    if (adjust_action_time_for_dst(&scheduled_ts)) {
-        timestamp_to_datetime(scheduled_ts, &dt);
-        if (!rtc_update_alarm(dt.day, dt.hour, dt.min, startup)) {
-            return false;
-        }
-    } else {
-        if (!rtc_update_alarm(day, hour, min, startup)) {
-            return false;
-        }
-        debug_log("Set Alarm %02d %02d:%02d for %s\n",
-                  day, hour, min, startup ? "startup" : "shutdown");
-    }
+    int64_t scheduled_ts = dst_action_to_hardware_local(get_total_seconds(&dt));
+    timestamp_to_datetime(scheduled_ts, &dt);
+    if (!rtc_update_alarm(dt.day, dt.hour, dt.min, startup)) return false;
+    debug_log("Set Alarm %02d %02d:%02d for %s\n",
+              dt.day, dt.hour, dt.min, startup ? "startup" : "shutdown");
 
     schedule_mark_processed_this_boot();
     return true;

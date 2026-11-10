@@ -119,6 +119,12 @@ bool rtc_set_timestamp(int64_t timestamp);
  */
 void rtc_clear_alarm_flag(void);
 
+/** True while deferred RTC alarm configuration is not yet applied. */
+bool rtc_has_pending_alarm_conf(void);
+
+/** Apply deferred RTC alarm configuration immediately; retry failures later. */
+bool rtc_flush_pending_alarm_conf(void);
+
 /** Consume the IRQ event without touching I2C inside interrupt context. */
 bool rtc_take_gpio_alarm(void);
 

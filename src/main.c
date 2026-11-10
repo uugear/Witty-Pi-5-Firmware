@@ -494,8 +494,10 @@ int main() {
 		if (!factory_reset_pending && conf_get(CONF_BOOTSEL_FTY_RST)) {
 			check_bootsel_button(NULL, NULL, bootsel_long_pressed_callback);
 		}
-		if (current_rpi_state == STATE_OFF) {
-    		if (hibernate_is_forced_entry_requested() || hibernate_can_enter()) {
+        if (current_rpi_state == STATE_OFF) {
+            // Let the deferred writer retry before another forced sleep attempt.
+            if (!rtc_has_pending_alarm_conf() &&
+                (hibernate_is_forced_entry_requested() || hibernate_can_enter())) {
     		    debug_log("Entering hibernation...\n");
                 int rc = hibernate_enter();
                 if (rc != PICO_OK) {

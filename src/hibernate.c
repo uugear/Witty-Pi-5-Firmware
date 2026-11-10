@@ -234,6 +234,11 @@ bool hibernate_can_enter(void) {
         hibernate_block_flags |= HIBERNATE_BLOCK_FATFS_DOWN;
     }
 
+    // Never sleep with an unapplied RTC alarm configuration.
+    if (rtc_has_pending_alarm_conf()) {
+        hibernate_block_flags |= HIBERNATE_BLOCK_RTC_PENDING;
+    }
+
     // Already-active wake lines should be handled before entering POWMAN.
     if (hibernate_get_active_gpio_flags() != 0u) {
         hibernate_block_flags |= HIBERNATE_BLOCK_GPIO_ACTIVE;
@@ -307,13 +312,28 @@ int hibernate_enter(void) {
         usb_msc_mark_ejected_and_wait(USB_MSC_AUTO_EJECT_WAIT_MS);
     }
 
+    // Do not touch RTC alarms when an unrelated condition already blocks sleep.
+    if (!hibernate_can_enter() &&
+        hibernate_get_block_flags() != HIBERNATE_BLOCK_RTC_PENDING) {
+        return PICO_ERROR_INVALID_STATE;
+    }
+
+    // A direct hibernation request must not bypass the deferred alarm writer.
+    if (!rtc_flush_pending_alarm_conf()) {
+        debug_log("Cannot hibernate: RTC alarm configuration is not applied.\n");
+        return PICO_ERROR_IO;
+    }
     if (!hibernate_can_enter()) {
         return PICO_ERROR_INVALID_STATE;
     }
 
     hibernate_flush_persistent_tasks();
 
-    // Re-check after flushing because callbacks or file tasks may have run.
+    // Filesystem and configuration tasks may have introduced pending updates.
+    if (!rtc_flush_pending_alarm_conf()) {
+        debug_log("Cannot hibernate: RTC alarm configuration is not applied.\n");
+        return PICO_ERROR_IO;
+    }
     if (!hibernate_can_enter()) {
         return PICO_ERROR_INVALID_STATE;
     }

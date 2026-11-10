@@ -256,46 +256,50 @@ int64_t sync_time_callback(alarm_id_t id, void *user_data) {
 }
 
 
-static void rtc_apply_alarm1_conf(void) {
+static bool rtc_apply_alarm1_conf(void) {
     int date = bcd_to_dec(conf_get(CONF_ALARM1_DAY));
-	int hour = bcd_to_dec(conf_get(CONF_ALARM1_HOUR));
-	int minute = bcd_to_dec(conf_get(CONF_ALARM1_MINUTE));
-	int second = bcd_to_dec(conf_get(CONF_ALARM1_SECOND));
-	if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
-		debug_log("Clear Alarm1\n");
-		rtc_set_alarm(0, 0, 0, true);
-	} else {
-		DateTime dt;
-        if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
-            debug_log("Cannot resolve next configured RTC alarm date.\n");
-            return;
-        }
-        int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
-        timestamp_to_datetime(ts, &dt);
-		debug_log("Set Alarm1 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
-		rtc_set_alarm(dt.day, dt.hour, dt.min, true);
-	}
+    int hour = bcd_to_dec(conf_get(CONF_ALARM1_HOUR));
+    int minute = bcd_to_dec(conf_get(CONF_ALARM1_MINUTE));
+    int second = bcd_to_dec(conf_get(CONF_ALARM1_SECOND));
+    if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
+        if (!rtc_update_alarm(0, 0, 0, true)) return false;
+        debug_log("Clear Alarm1\n");
+        return true;
+    }
+
+    DateTime dt;
+    if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
+        debug_log("Cannot resolve next configured RTC alarm date.\n");
+        return false;
+    }
+    int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
+    timestamp_to_datetime(ts, &dt);
+    if (!rtc_update_alarm(dt.day, dt.hour, dt.min, true)) return false;
+    debug_log("Set Alarm1 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
+    return true;
 }
 
-static void rtc_apply_alarm2_conf(void) {
+static bool rtc_apply_alarm2_conf(void) {
     int date = bcd_to_dec(conf_get(CONF_ALARM2_DAY));
-	int hour = bcd_to_dec(conf_get(CONF_ALARM2_HOUR));
-	int minute = bcd_to_dec(conf_get(CONF_ALARM2_MINUTE));
-	int second = bcd_to_dec(conf_get(CONF_ALARM2_SECOND));
-	if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
-		debug_log("Clear Alarm2\n");
-		rtc_set_alarm(0, 0, 0, false);
-	} else {
-		DateTime dt;
-        if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
-            debug_log("Cannot resolve next configured RTC alarm date.\n");
-            return;
-        }
-        int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
-        timestamp_to_datetime(ts, &dt);
-		debug_log("Set Alarm2 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
-		rtc_set_alarm(dt.day, dt.hour, dt.min, false);
-	}
+    int hour = bcd_to_dec(conf_get(CONF_ALARM2_HOUR));
+    int minute = bcd_to_dec(conf_get(CONF_ALARM2_MINUTE));
+    int second = bcd_to_dec(conf_get(CONF_ALARM2_SECOND));
+    if (date < 1 || date > 31 || hour > 23 || minute > 59 || second > 59) {
+        if (!rtc_update_alarm(0, 0, 0, false)) return false;
+        debug_log("Clear Alarm2\n");
+        return true;
+    }
+
+    DateTime dt;
+    if (!rtc_get_scheduled_time(date, hour, minute, second, &dt)) {
+        debug_log("Cannot resolve next configured RTC alarm date.\n");
+        return false;
+    }
+    int64_t ts = dst_action_to_hardware_local(get_total_seconds(&dt));
+    timestamp_to_datetime(ts, &dt);
+    if (!rtc_update_alarm(dt.day, dt.hour, dt.min, false)) return false;
+    debug_log("Set Alarm2 to %02d %02d:%02d\n", dt.day, dt.hour, dt.min);
+    return true;
 }
 
 // Extra processing after alarm configuration is changed
@@ -754,23 +758,47 @@ void rtc_restore_alarm_type_after_hibernate(uint8_t type) {
 
 
 /**
- * Process pending alarm configuration at correct moment
+ * Whether a deferred RTC alarm configuration still needs to be applied.
+ */
+bool rtc_has_pending_alarm_conf(void) {
+    return alarm_conf_apply_scheduled ||
+           alarm1_conf_changed_pending || alarm2_conf_changed_pending;
+}
+
+/**
+ * Apply deferred RTC alarm configurations immediately.
+ * Keep failed updates pending so they can be retried without losing the alarm.
+ */
+bool rtc_flush_pending_alarm_conf(void) {
+    if (!rtc_has_pending_alarm_conf()) {
+        return true;
+    }
+
+    if (alarm1_conf_changed_pending && rtc_apply_alarm1_conf()) {
+        alarm1_conf_changed_pending = false;
+    }
+
+    if (alarm2_conf_changed_pending && rtc_apply_alarm2_conf()) {
+        alarm2_conf_changed_pending = false;
+    }
+
+    if (!alarm1_conf_changed_pending && !alarm2_conf_changed_pending) {
+        alarm_conf_apply_scheduled = false;
+        return true;
+    }
+
+    // Rate-limit retries while keeping hibernation blocked on failure.
+    alarm_conf_apply_scheduled = true;
+    alarm_conf_apply_after = make_timeout_time_ms(RTC_ALARM_CONF_APPLY_DELAY_MS);
+    return false;
+}
+
+/**
+ * Process deferred RTC alarm configurations when the coalescing delay expires.
  */
 void rtc_process_pending_alarm_conf(void) {
-    if (!alarm_conf_apply_scheduled || !time_reached(alarm_conf_apply_after)) {
-        return;
-    }
-
-    alarm_conf_apply_scheduled = false;
-
-    if (alarm1_conf_changed_pending) {
-        alarm1_conf_changed_pending = false;
-        rtc_apply_alarm1_conf();
-    }
-
-    if (alarm2_conf_changed_pending) {
-        alarm2_conf_changed_pending = false;
-        rtc_apply_alarm2_conf();
+    if (alarm_conf_apply_scheduled && time_reached(alarm_conf_apply_after)) {
+        (void)rtc_flush_pending_alarm_conf();
     }
 }
 

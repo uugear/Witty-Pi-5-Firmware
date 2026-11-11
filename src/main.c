@@ -203,6 +203,42 @@ void rtc_alarm_occuried_callback() {
 }
 
 
+/**
+ * Recover an RTC startup alarm that becomes due during a timer pulse wake.
+ *
+ * The first RTC check at boot may see no alarm, but RTC_INT can assert while
+ * hibernate_enter() flushes flash or prepares POWMAN. Handle the original
+ * startup action before load_script(true) can advance it to the next cycle.
+ * Only an asserted RTC interrupt or RX8025 alarm flag qualifies as an event.
+ */
+static bool recover_rtc_alarm_during_pulse_wake(const char *phase, uint32_t wake_flags) {
+    uint32_t active_gpio = hibernate_get_active_gpio_flags();
+    bool rtc_int_active = (active_gpio & HIBERNATE_ACTIVE_RTC) != 0;
+    bool rtc_alarm_pending = rtc_is_alarm_pending();
+
+    if (!rtc_int_active && !rtc_alarm_pending) {
+        return false;
+    }
+
+    uint8_t alarm_type = rtc_get_alarm_type();
+    if (alarm_type != ALARM_TYPE_STARTUP || !dst_configured_alarm_ready(false)) {
+        debug_log("RTC/pulse wake collision (%s): wake=0x%08lx GPIO=0x%02lx AF=%u type=%u; startup not due.\n",
+                  phase, (unsigned long)wake_flags, (unsigned long)active_gpio,
+                  rtc_alarm_pending ? 1u : 0u, (unsigned int)alarm_type);
+        return false;
+    }
+
+    debug_log("RTC/pulse wake race recovered (%s): wake=0x%08lx GPIO=0x%02lx AF=%u; dispatch startup before script reload.\n",
+              phase, (unsigned long)wake_flags, (unsigned long)active_gpio,
+              rtc_alarm_pending ? 1u : 0u);
+    rtc_alarm_occuried_callback();
+    schedule_mark_processed_this_boot();
+    rtc_clear_alarm_flag();
+    (void)rtc_take_gpio_alarm();  // Discard the IRQ edge for this handled alarm.
+    return true;
+}
+
+
 // Callback for retrying over-temperature startup action
 int64_t retry_over_temp_startup_callback(alarm_id_t id, void *user_data) {
     perform_temp_action(TEMP_ACTION_STARTUP, false, true);
@@ -341,6 +377,7 @@ int main() {
         dst_changed = dst_process_due_transition();
     }
     bool dst_action_dispatched = false;
+    bool pulse_hibernate_failed = false;
 
 	if (resumed_from_hibernate) {
 
@@ -389,8 +426,12 @@ int main() {
                 hibernate_skip_usb_grace();
                 int rc = hibernate_enter();
                 if (rc != PICO_OK) {
+                    pulse_hibernate_failed = true;
                     debug_log("Failed to re-enter hibernation after pulse wake: %d (block_flags=0x%08lx)\n",
                               rc, (unsigned long)hibernate_get_block_flags());
+                    if (recover_rtc_alarm_during_pulse_wake("hibernate rejected", wake_flags)) {
+                        dst_action_dispatched = true;
+                    }
                 }
             }
         }
@@ -444,6 +485,14 @@ int main() {
 		debug_log("Raspberry Pi is turned on because \"Default ON\" is set.\n");
         request_startup(ACTION_REASON_POWER_CONNECTED);
 	}
+
+    // A pulse wake can reach its RTC alarm just after the failed sleep check.
+    // Check once more before a script reload could discard the due startup.
+    if (pulse_hibernate_failed && !dst_action_dispatched &&
+        current_rpi_state == STATE_OFF &&
+        recover_rtc_alarm_during_pulse_wake("before script reload", initial_wake_flags)) {
+        dst_action_dispatched = true;
+    }
 
     // Process schedule script or schedule shutdown as per configuration
     if (!schedule_was_processed_this_boot()) {
